@@ -1,36 +1,47 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Investara
 
-## Getting Started
+Investara combines an IDX screener, investment shortlist, market and macro dashboards, a dividend calendar, crypto research, watchlists, alerts, portfolio tracking, and paper trading.
 
-First, run the development server:
+## Local development
 
-```bash
+Use Node.js 24 and run these commands from the web repository.
+
+```sh
+npm ci
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm test
+npm run build
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Copy the variable names from [.env.example](.env.example) into your local configuration. Set the Auth.js secret for sign-in, optional OAuth credentials for the login providers you use, and optional Gemini credentials for the AI analyst.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Market data and news
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Crypto prices come from Binance Spot in USDT or Yahoo Finance in USD. The list labels each quote with its provider and available timestamp. IDR uses a fixed reference rate of Rp15.850. Market-cap totals and BTC share cover assets with Yahoo Finance capitalization data. A missing value appears as a dash, and the market-cap ranking excludes missing and stale values. Crypto technical indicators and historical simulations use daily Yahoo Finance prices.
 
-## Learn More
+Macro quotes keep the original provider timestamp when the app serves a saved quote during an outage. News uses publication timestamps and article-level links supplied by the feed.
 
-To learn more about Next.js, take a look at the following resources:
+## Portfolio
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+New trades recorded in Investara update the portfolio and transaction log together. Sales consume the oldest available lots first. Deleting a linked transaction recalculates the remaining holdings. If that would leave a later sale without enough lots, correct the sale first. Existing holdings enter the calculation as opening positions, and older log entries remain visible as history.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Free hosting on Vercel
 
-## Deploy on Vercel
+Vercel Hobby hosts the Next.js app for personal, non-commercial use. Turso Free stores accounts, portfolios, watchlists, screeners, and alert state. [Vercel Hobby](https://vercel.com/docs/plans/hobby) · [Turso Free](https://turso.tech/pricing)
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+1. Create a libSQL database on Turso Cloud and generate a database-scoped read/write token. With the Turso CLI, use `turso db create investara`, `turso db show investara --url`, and `turso db tokens create investara`. [Turso quickstart](https://docs.turso.tech/quickstart)
+2. Create a Vercel Hobby project using Next.js and Node.js 24. Import the Git repository or use `npx vercel link` from `web` to deploy directly from this folder. For a Git repository that contains the workspace, set the Vercel root directory to `web`. The [Vercel configuration](vercel.json) runs server functions in Singapore, the region of the Investara Turso database.
+3. Set `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `AUTH_SECRET`, and `CRON_SECRET` for Production. Generate the two secrets independently, for example with `openssl rand -hex 32`. Optional OAuth, Gemini, and Web Push settings are listed in [.env.example](.env.example). Configure OAuth callback URLs for the production domain if you enable OAuth.
+4. Deploy in Vercel or run `npx vercel deploy --prod` from `web`. Verify sign-in, a saved watchlist entry, and the scheduled job in the Vercel project. The app creates the schema on first use. A new hosted database starts empty. Keep a backup of `data/app.db` if you plan to import data from local development.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+### Alert scheduling
+
+The included cron runs on weekdays during the 16:00 WIB hour. Vercel Hobby can start the job at any point in that hour. For more frequent scans, a separate scheduler can send a GET request to `/api/internal/alerts/sweep` with `Authorization: Bearer <CRON_SECRET>`. Keep the secret in the scheduler’s private settings. [Vercel cron limits](https://vercel.com/docs/schedules/cron-jobs/usage-and-pricing)
+
+- Create saved screeners from the filter panel. The monitor records the initial match set, then adds newly matching stocks and price-target crossings to the alert inbox.
+- Set ALERT_PUSH_SUBJECT to a public contact email with a mailto: prefix or an HTTPS URL. Use HTTPS for production push notifications and enable notifications on each device from the Alert page.
+- CI runs the production build and regression tests for provider outages, portfolio changes, and chat request limits. The in-process chat quota applies independently to each server process.
+
+On a continuously running Node.js server, Investara can use local SQLite at `data/app.db` and run its background monitor in one process. Set `ALERT_MONITOR_ENABLED=0` to disable alert scans. Back up the database with SQLite’s backup tooling.
+
+For the standalone Streamlit prototype, install the Python dependencies from requirements.txt at the workspace root and run streamlit run main.py there.
