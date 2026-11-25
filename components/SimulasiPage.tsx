@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { track } from "@vercel/analytics";
 import Link from "next/link";
 import {
   usePaperTrading,
@@ -81,6 +82,7 @@ export function SimulasiPage() {
       );
 
       if (count > 0) {
+        track("paper_trade_opened", { source: "simulation", mode: "batch" });
         setBatchToast(`🎉 ${count} Saham Terkurasi (Super Picks + Pilihan Utama) hari ini (${todayStr}) berhasil dimasukkan! Posisi siap dievaluasi.`);
       } else {
         setBatchToast("Tidak ada posisi baru. Periksa saldo, harga masuk, dan posisi yang sudah aktif.");
@@ -146,6 +148,7 @@ export function SimulasiPage() {
       setEntryError("Posisi gagal dibuka. Periksa saldo, jumlah lot, serta urutan TP dan SL.");
       return;
     }
+    track("paper_trade_opened", { source: "simulation", mode: "single" });
     setEntryError("");
     setInputPrice("");
     setShowAddModal(false);

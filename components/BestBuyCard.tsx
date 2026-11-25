@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { track } from "@vercel/analytics";
 import type { BestBuyData } from "@/lib/types";
 import { rp, num } from "@/lib/format";
 import { usePaperTrading } from "@/lib/paperTrading";
@@ -35,6 +36,7 @@ export function BestBuyCard({ kode, nama, harga, bestBuy, onSetAlert }: BestBuyC
       notes: `Best Buy Zone Entry di ${rp(bestBuy.entryHigh)} (${bestBuy.statusLabel})`,
     });
 
+    if (trade) track("paper_trade_opened", { source: "best_buy", mode: "single" });
     setToast(trade
       ? `Simulasi ${kode} dibuka di ${rp(bestBuy.entryHigh)} (${recommendedLot} lot).`
       : `Saldo simulasi belum cukup untuk membuka ${recommendedLot} lot ${kode}.`);

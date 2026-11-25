@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { track } from "@vercel/analytics";
 import { compact, num, pct } from "@/lib/format";
 import { completedMoneyFlow, type BrokerActivity, type InsiderReport } from "@/lib/stockActivity";
 import type { GrossBroker } from "@/lib/publicStockActivity";
@@ -212,6 +213,11 @@ function ActivityFeed({ kode, view }: { kode: string; view: "broker" | "insider"
 
 export function StockActivity({ kode, insiderPct }: { kode: string; insiderPct: number | null }) {
   const [view, setView] = useState<"broker" | "insider" | null>(null);
+  function openActivity(next: "broker" | "insider") {
+    if (view === next) return;
+    setView(next);
+    track("stock_activity_opened", { panel: next });
+  }
   return (
     <section id="aktivitas-saham" aria-labelledby="aktivitas-saham-title" className="scroll-mt-28">
       <Card className="space-y-4 p-4 sm:p-6">
@@ -220,8 +226,8 @@ export function StockActivity({ kode, insiderPct }: { kode: string; insiderPct: 
           <p className={caption}>Pantau aktivitas broker dan perubahan kepemilikan yang dilaporkan untuk {kode}.</p>
         </div>
         <div className="flex flex-wrap gap-2" role="group" aria-label="Jenis aktivitas saham">
-          <button type="button" className={`${control} aria-pressed:ring-2 aria-pressed:ring-emerald-600`} aria-pressed={view === "broker"} aria-controls="aktivitas-saham-panel" onClick={() => setView("broker")}>Bandarmology</button>
-          <button type="button" className={`${control} aria-pressed:ring-2 aria-pressed:ring-emerald-600`} aria-pressed={view === "insider"} aria-controls="aktivitas-saham-panel" onClick={() => setView("insider")}>Insider</button>
+          <button type="button" className={`${control} aria-pressed:ring-2 aria-pressed:ring-emerald-600`} aria-pressed={view === "broker"} aria-controls="aktivitas-saham-panel" onClick={() => openActivity("broker")}>Bandarmology</button>
+          <button type="button" className={`${control} aria-pressed:ring-2 aria-pressed:ring-emerald-600`} aria-pressed={view === "insider"} aria-controls="aktivitas-saham-panel" onClick={() => openActivity("insider")}>Insider</button>
         </div>
         <div id="aktivitas-saham-panel" className="min-w-0 space-y-4">
           {view === "broker" && <MoneyFlow kode={kode} />}

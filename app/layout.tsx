@@ -6,6 +6,7 @@ import { Providers } from "@/components/Providers";
 import { AiChatbot } from "@/components/AiChatbot";
 import { CommandPalette } from "@/components/CommandPalette";
 import { DynamicIslandDock } from "@/components/DynamicIslandDock";
+import { InvestaraAnalytics } from "@/components/InvestaraAnalytics";
 
 export const metadata: Metadata = {
   title: "Investara - Platform Analisis Saham IDX & Kripto",
@@ -50,6 +51,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <DynamicIslandDock />
           </Suspense>
         </Providers>
+        <InvestaraAnalytics />
       </body>
     </html>
   );

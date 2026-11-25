@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useSession } from "next-auth/react";
+import { track } from "@vercel/analytics";
 import { Card } from "./ui";
 import { LoginButtons } from "./AuthButtons";
 import { AlertInbox } from "./AlertInbox";
@@ -114,6 +115,7 @@ function AlertView({ initialCode }: { initialCode: string }) {
         const j = await res.json().catch(() => ({}));
         throw new Error(j.error || "Gagal menyimpan alert");
       }
+      track("price_alert_created", { source: "alerts" });
       setKode("");
       setTargetHarga("");
       setCatatan("");

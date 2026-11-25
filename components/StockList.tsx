@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { track } from "@vercel/analytics";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import type { ListItem, ListResponse } from "@/lib/types";
@@ -255,6 +256,7 @@ export function StockList() {
       notes: source === "news" ? "Radar Berita" : `Radar Swing · Skor ${score ?? "belum tersedia"} · Sinyal ${s.foreign_status || "Akumulasi Support"}`,
     });
 
+    if (trade) track("paper_trade_opened", { source: source === "news" ? "news_radar" : "swing_radar", mode: "single" });
     setSimToast({
       msg: trade
         ? `Posisi Paper Trade dibuka untuk ${s.kode} di ${rp(trade.entryPrice)} (${recommendedLot} Lot). TP1 ${rp(trade.targetTp1)}, TP2 ${rp(trade.targetTp2)}, SL ${rp(trade.stopLoss)}.`
@@ -305,6 +307,7 @@ export function StockList() {
       );
 
       if (count > 0) {
+        track("paper_trade_opened", { source: "swing_radar", mode: "batch" });
         setSimToast({
           msg: `🎉 ${count} saham ${superOnly ? "Super Picks" : "Swing Terkurasi (Super + Pilihan Utama)"} hari ini berhasil dimasukkan ke Simulasi! Besok sistem otomatis mengevaluasi target TP1/TP2 vs SL.`,
           kode: "BATCH",

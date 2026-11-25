@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { track } from "@vercel/analytics";
 import type { Detail } from "@/lib/types";
 import { compact, num, pct, rp } from "@/lib/format";
 import { Card, Stat, StatusBadge } from "./ui";
@@ -107,6 +108,7 @@ export function StockDetail({ kode }: { kode: string }) {
         }),
       });
       if (res.ok) {
+        track("price_alert_created", { source: "stock_detail" });
         setAlertStatus("✓ Alert berhasil disimpan!");
         setTimeout(() => {
           setAlertOpen(false);

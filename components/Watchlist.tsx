@@ -2,6 +2,7 @@
 
 import { useEffect, useSyncExternalStore } from "react";
 import { useSession } from "next-auth/react";
+import { track } from "@vercel/analytics";
 
 const EMPTY_LIST: string[] = [];
 type WatchlistSnapshot = {
@@ -72,7 +73,10 @@ export function useWatchlist() {
       });
       if (!response.ok) throw new Error("Gagal mengubah watchlist.");
       const { kodes }: { kodes: string[] } = await response.json();
-      if (version === requestVersion) set({ ...snapshot, list: kodes });
+      if (version === requestVersion) {
+        set({ ...snapshot, list: kodes });
+        track("watchlist_updated", { action: has ? "removed" : "added" });
+      }
       return true;
     } catch {
       return version !== requestVersion;

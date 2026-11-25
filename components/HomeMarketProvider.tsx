@@ -1,6 +1,7 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { track } from "@vercel/analytics";
 import type { NewsScan } from "@/lib/sentimentScanner";
 import type { PasarResponse } from "@/lib/types";
 
@@ -124,6 +125,7 @@ export function HomeMarketProvider({ children }: { children: ReactNode }) {
   }, [load, radarOpen]);
 
   function openRadar() {
+    if (!radarOpen) track("news_radar_opened");
     setRadarOpen(true);
     radarHeading.current?.focus({ preventScroll: true });
     radarHeading.current?.scrollIntoView({ block: "start" });
