@@ -4,6 +4,7 @@ export type ListItem = {
   papan: string;
   sektor: string | null;
   harga: number | null;
+  quoteAt?: number | null;
   perubahan_pct: number | null;
   mcap: number | null;
   per: number | null;
@@ -166,6 +167,7 @@ export type Detail = {
   harga: number | null;
   perubahan: number | null;
   perubahan_pct: number | null;
+  quoteStale?: boolean;
   buka: number | null;
   tutup_kemarin: number | null;
   hari_rendah: number | null;

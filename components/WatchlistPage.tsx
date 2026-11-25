@@ -9,9 +9,10 @@ import { Card } from "./ui";
 import { LoginButtons } from "./AuthButtons";
 import { StarButton, useWatchlist } from "./Watchlist";
 import { StockLogo } from "./StockLogo";
+import { WatchlistActivity } from "./WatchlistActivity";
 
 export function WatchlistPage() {
-  const { status } = useSession();
+  const { status, data } = useSession();
   if (status === "loading") {
     return (
       <main className="screen-shell py-16 text-center text-sm text-zinc-500 dark:text-zinc-400">
@@ -35,39 +36,56 @@ export function WatchlistPage() {
       </main>
     );
   }
-  return <WatchlistView />;
+  return <WatchlistView key={data?.user?.id} />;
 }
 
 function WatchlistView() {
-  const { list, ready } = useWatchlist();
+  const { list, ready, error: watchlistError, reload } = useWatchlist();
   const [items, setItems] = useState<ListItem[]>([]);
   const [updated, setUpdated] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
+  const [quoteError, setQuoteError] = useState(false);
+  const [retry, setRetry] = useState(0);
   const kodesKey = [...list].sort().join(",");
 
   useEffect(() => {
     if (!ready) return;
     if (!kodesKey) return;
-    let cancel = false;
+    const controller = new AbortController();
+    let pending = false;
     const load = () => {
+      if (pending) return;
+      pending = true;
       setBusy(true);
-      fetch(`/api/saham?kodes=${kodesKey}&size=100&sort=mcap&dir=desc`)
-        .then((r) => (r.ok ? r.json() : null))
-        .then((j: ListResponse | null) => {
-          if (cancel || !j) return;
-          setItems(j.items);
-          setUpdated(j.updatedAt);
+      const codes = kodesKey.split(",");
+      const batches = [];
+      for (let start = 0; start < codes.length; start += 300) {
+        const query = new URLSearchParams({ kodes: codes.slice(start, start + 300).join(","), size: "300" });
+        batches.push(fetch(`/api/saham?${query}`, { signal: controller.signal }).then(async (r): Promise<ListResponse> => {
+          if (!r.ok) throw new Error("Harga belum tersedia.");
+          return r.json();
+        }));
+      }
+      Promise.all(batches)
+        .then((results) => {
+          if (controller.signal.aborted) return;
+          setItems(results.flatMap(({ items }) => items).sort((a, b) => (b.mcap ?? 0) - (a.mcap ?? 0)));
+          setUpdated(Math.min(...results.map(({ updatedAt }) => updatedAt)));
+          setQuoteError(false);
         })
-        .catch(() => {})
-        .finally(() => !cancel && setBusy(false));
+        .catch(() => { if (!controller.signal.aborted) setQuoteError(true); })
+        .finally(() => {
+          pending = false;
+          if (!controller.signal.aborted) setBusy(false);
+        });
     };
     load();
     const t = setInterval(() => !document.hidden && load(), 60_000);
     return () => {
-      cancel = true;
+      controller.abort();
       clearInterval(t);
     };
-  }, [kodesKey, ready]);
+  }, [kodesKey, ready, retry]);
 
   const shown = list.length ? items.filter((i) => list.includes(i.kode)) : [];
 
@@ -90,8 +108,15 @@ function WatchlistView() {
         )}
       </div>
 
+      {ready && list.length > 0 && <WatchlistActivity kodesKey={kodesKey} />}
+
       <Card className="overflow-hidden p-0 shadow-xs">
-        {!ready ? (
+        {watchlistError ? (
+          <div className="flex flex-wrap items-center gap-3 p-5 text-sm">
+            <p role="alert">Watchlist gagal dimuat.</p>
+            <button type="button" onClick={() => void reload()} className="control-button ios-glass-pill rounded-xl font-semibold">Coba lagi</button>
+          </div>
+        ) : !ready ? (
           <p className="p-12 text-center text-sm text-zinc-500 dark:text-zinc-400">Memuat watchlist...</p>
         ) : list.length === 0 ? (
           <div className="p-12 text-center space-y-2">
@@ -101,6 +126,16 @@ function WatchlistView() {
             </p>
           </div>
         ) : (
+          <>
+          {quoteError && (
+            <div className="flex flex-wrap items-center gap-3 p-4 text-sm">
+              <p role="alert">Harga terbaru gagal dimuat.</p>
+              <button type="button" onClick={() => setRetry((value) => value + 1)} className="control-button ios-glass-pill rounded-xl font-semibold">Coba lagi</button>
+            </div>
+          )}
+          {shown.length === 0 && !quoteError && (
+            <p role="status" className="p-4 text-sm">{busy || updated === null ? "Memuat harga saham…" : "Harga saham pantauan belum tersedia."}</p>
+          )}
           <div className="table-scroll">
             <table className="w-full text-sm">
               <thead>
@@ -137,6 +172,7 @@ function WatchlistView() {
               </tbody>
             </table>
           </div>
+          </>
         )}
       </Card>
     </main>

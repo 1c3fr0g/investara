@@ -13,6 +13,7 @@ export function CryptoDetail({ symbol }: { symbol: string }) {
   const [data, setData] = useState<CryptoDetailData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
   const [currency, setCurrency] = useState<"IDR" | "USD">("IDR");
 
   // Chart view: TradingView (Binance live feed) vs Simple Line
@@ -29,11 +30,11 @@ export function CryptoDetail({ symbol }: { symbol: string }) {
   const [lumpSumPeriodIdx, setLumpSumPeriodIdx] = useState<number>(2); // Default: 1 Tahun Lalu
   const [showMethodology, setShowMethodology] = useState<boolean>(false);
 
-  const loadDetail = (isRetry = false) => {
-    if (!isRetry) setLoading(true);
-    setError(null);
-    const cleanSym = encodeURIComponent(symbol.trim().toLowerCase());
-    fetch(`/api/crypto/${cleanSym}?refresh=1`)
+  const cleanSym = encodeURIComponent(symbol.trim().toLowerCase());
+  useEffect(() => {
+    const controller = new AbortController();
+    const query = attempt > 0 ? "?refresh=1" : "";
+    fetch(`/api/crypto/${cleanSym}${query}`, { signal: controller.signal })
       .then(async (res) => {
         if (!res.ok) {
           const errData = await res.json().catch(() => null);
@@ -45,37 +46,44 @@ export function CryptoDetail({ symbol }: { symbol: string }) {
         if (!json || !json.symbol) {
           throw new Error("Format data cryptocurrency tidak lengkap");
         }
-        setData(json);
+        if (!controller.signal.aborted) setData(json);
       })
       .catch((err) => {
-        setError(err instanceof Error ? err.message : "Gagal memuat data cryptocurrency");
+        if (!controller.signal.aborted) {
+          setError(err instanceof Error ? err.message : "Gagal memuat data cryptocurrency");
+        }
       })
-      .finally(() => setLoading(false));
-  };
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, [attempt, cleanSym, symbol]);
 
+  const hasDetail = Boolean(data);
   useEffect(() => {
-    loadDetail();
-  }, [symbol]);
-
-  // Seamless Background Auto-Refresh (every 2.5 seconds) - Updates price & stats without page reload
-  // Seamless Background Auto-Refresh (every 15 seconds) - Updates price & stats without page reload
-  useEffect(() => {
-    if (!symbol) return;
+    if (!hasDetail) return;
+    const controller = new AbortController();
+    let refreshing = false;
     const interval = setInterval(() => {
-      if (document.hidden) return;
-      fetch(`/api/crypto/${encodeURIComponent(symbol)}?quote=1`)
+      if (document.hidden || refreshing) return;
+      refreshing = true;
+      fetch(`/api/crypto/${cleanSym}?quote=1`, { signal: controller.signal })
         .then((res) => (res.ok ? res.json() : null))
         .then((latest: CryptoItem | null) => {
-          if (latest?.symbol) {
+          if (latest?.symbol && !controller.signal.aborted) {
             setData((current) => current?.symbol === latest.symbol
               ? { ...current, ...latest, change_7d: current.change_7d, sparkline: current.sparkline }
               : current);
           }
         })
-        .catch(() => {});
+        .catch(() => {})
+        .finally(() => { refreshing = false; });
     }, 15000);
-    return () => clearInterval(interval);
-  }, [symbol]);
+    return () => {
+      clearInterval(interval);
+      controller.abort();
+    };
+  }, [cleanSym, hasDetail]);
 
   if (loading) {
     return (
@@ -91,11 +99,15 @@ export function CryptoDetail({ symbol }: { symbol: string }) {
         <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-amber-100 text-2xl dark:bg-amber-950/60 mb-3">
           ⚠️
         </div>
-        <h2 className="text-xl font-bold text-zinc-900 dark:text-zinc-100">Koin Belum Tersedia atau Sedang Dimuat</h2>
+        <h1 className="text-xl font-bold text-zinc-900 dark:text-zinc-100">Data {symbol.toUpperCase()} Belum Tersedia</h1>
         <p className="mt-2 text-sm text-zinc-500">{error || "Data koin kripto ini sedang diperbarui dari jaringan Binance."}</p>
         <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
           <button
-            onClick={() => loadDetail(true)}
+            onClick={() => {
+              setLoading(true);
+              setError(null);
+              setAttempt((current) => current + 1);
+            }}
             className="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-xs transition hover:bg-emerald-500"
           >
             🔄 Coba Muat Ulang
@@ -303,7 +315,7 @@ export function CryptoDetail({ symbol }: { symbol: string }) {
                 </span>
               </div>
               <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-                Konsensus: {data.consensus} • Feed Live: <span className="text-emerald-600 dark:text-emerald-400 font-semibold">Binance Spot ({data.symbol}USDT)</span>
+                Konsensus: {data.consensus} • Sumber kutipan: <span className="text-emerald-600 dark:text-emerald-400 font-semibold">{data.quoteSource} ({data.quoteCurrency})</span>
               </p>
             </div>
           </div>
@@ -940,7 +952,7 @@ export function CryptoDetail({ symbol }: { symbol: string }) {
             <div className="flex items-center justify-between py-3">
               <span className="text-xs text-zinc-500">Suplai Maksimal (Max Supply)</span>
               <span className="text-xs font-bold text-zinc-900 dark:text-zinc-100">
-                {data.max_supply ? `${data.max_supply.toLocaleString("en-US")} ${data.symbol}` : "Tidak Terbatas (Unlimited)"}
+                {data.max_supply != null ? `${data.max_supply.toLocaleString("en-US")} ${data.symbol}` : "Belum tersedia"}
               </span>
             </div>
 

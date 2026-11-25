@@ -2,9 +2,9 @@
 
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { ListItem, ListResponse, PasarResponse, SectorStat } from "@/lib/types";
-import { compact, num, pct, rp } from "@/lib/format";
+import { useEffect, useMemo, useState } from "react";
+import type { ListItem, ListResponse } from "@/lib/types";
+import { compact, num, pct, rp, signedPct } from "@/lib/format";
 import { GROUPS, MSCI_STANDARD, MSCI_SMALLCAP } from "@/lib/groups";
 import { Card } from "./ui";
 import { FILTER_PARAMS, FilterPanel, STRATEGY_PRESETS } from "./FilterPanel";
@@ -13,7 +13,9 @@ import { StockLogo } from "./StockLogo";
 import { PriceFlash, LiveBadge } from "./PriceFlash";
 import { usePaperTrading } from "@/lib/paperTrading";
 import { NewsSentimentRecommendations } from "./NewsSentimentRecommendations";
+import { useHomeMarket } from "./HomeMarketProvider";
 import type { MacroEvent } from "@/lib/macro";
+import { projectSwingPrices } from "@/lib/bestBuy";
 
 const MSCI_STANDARD_SET = new Set(MSCI_STANDARD);
 const MSCI_SMALLCAP_SET = new Set(MSCI_SMALLCAP);
@@ -24,7 +26,7 @@ const COLS = [
   { key: "nama", label: "Nama Perusahaan", left: true, nosort: true, w: "" },
   { key: "harga", label: "Harga", w: "w-28" },
   { key: "perubahan_pct", label: "Perubahan", w: "w-28" },
-  { key: "foreign_flow", label: "Arus Asing", w: "w-28" },
+  { key: "foreign_flow", label: "Proksi Arus CMF", w: "w-28" },
   { key: "nilai", label: "Nilai (Rp)", w: "w-28" },
   { key: "mcap", label: "M.Cap", w: "w-28" },
   { key: "per", label: "PER", w: "w-20" },
@@ -57,94 +59,6 @@ function roundToTick(price: number, dir: "floor" | "ceil" | "round" = "round"): 
   if (dir === "ceil") return Math.ceil(price / tick) * tick;
   return Math.round(price / tick) * tick;
 }
-
-const FALLBACK_MACRO_EVENTS: MacroEvent[] = [
-  {
-    id: "bi_rdg",
-    title: "Rapat Dewan Gubernur BI Rate",
-    date: "2026-11-20",
-    category: "BI_RATE",
-    impact: "HIGH",
-    flag: "🇮🇩",
-    currency: "IDR",
-    sahamPilihan: ["BBCA", "BBRI", "BSDE"],
-    badge: "🇮🇩 Suku Bunga Domestik",
-    source: "Bank Indonesia",
-    countdownDays: 3,
-    description: "Keputusan suku bunga acuan BI-Rate dan asesmen transmisi moneter.",
-    pengaruhKeIhsg: "Penurunan atau stabilitas suku bunga BI menekan biaya dana (CoF) perbankan dan mendorong kredit properti.",
-    sektorTerdampak: ["Perbankan", "Properti"],
-    tipsAksiTrader: "Cermati saham perbankan dan properti saat BI merilis arah kebijakan moneter.",
-  },
-  {
-    id: "us_pce",
-    title: "US Core PCE & FOMC Minutes",
-    date: "2026-11-21",
-    category: "CPI_US",
-    impact: "HIGH",
-    flag: "🇺🇸",
-    currency: "USD",
-    sahamPilihan: ["TLKM", "ASII"],
-    badge: "📊 Data Kunci The Fed",
-    source: "US BEA",
-    countdownDays: 4,
-    description: "Indikator inflasi pengeluaran konsumsi pribadi inti Amerika Serikat.",
-    pengaruhKeIhsg: "Inflasi AS yang melandai melemahkan DXY dan mempercepat aliran dana asing ke IHSG.",
-    sektorTerdampak: ["Big Cap Asing"],
-    tipsAksiTrader: "Antisipasi reli aset berisiko jika data PCE berada di bawah proyeksi.",
-  },
-  {
-    id: "idx_eval",
-    title: "Evaluasi Mayor Indeks LQ45 & IDX30",
-    date: "2026-11-26",
-    category: "MSCI",
-    impact: "HIGH",
-    flag: "🇮🇩",
-    currency: "IDX",
-    sahamPilihan: ["ACES", "MAPI"],
-    badge: "🏛 Evaluasi Mayor BEI",
-    source: "BEI",
-    countdownDays: 9,
-    description: "Penyesuaian bobot dan anggota indeks utama Bursa Efek Indonesia.",
-    pengaruhKeIhsg: "Emiten yang masuk indeks mendapatkan limpahan dana pasif reksa dana dan dana pensiun.",
-    sektorTerdampak: ["Ritel", "Consumer"],
-    tipsAksiTrader: "Manfaatkan momentum akumulasi sebelum tanggal efektif penyesuaian bobot.",
-  },
-  {
-    id: "china_pmi",
-    title: "China Caixin Manufacturing PMI",
-    date: "2026-11-28",
-    category: "INFLASI_ID",
-    impact: "MEDIUM",
-    flag: "🇨🇳",
-    currency: "CNY",
-    sahamPilihan: ["ADRO", "MBMA"],
-    badge: "🏭 Manufaktur China",
-    source: "Caixin & S&P",
-    countdownDays: 11,
-    description: "Aktivitas industri pabrik mitra dagang komoditas terbesar Indonesia.",
-    pengaruhKeIhsg: "Ekspansi manufaktur Tiongkok meningkatkan permintaan batubara dan nikel.",
-    sektorTerdampak: ["Energi", "Logam"],
-    tipsAksiTrader: "Trading saham komoditas saat data PMI terkonfirmasi ekspansif.",
-  },
-  {
-    id: "msci_rebalance",
-    title: "Efektif Rebalancing MSCI Semi-Annual",
-    date: "2026-11-30",
-    category: "MSCI",
-    impact: "HIGH",
-    flag: "🌍",
-    currency: "MSCI",
-    sahamPilihan: ["AMMN", "BRMS"],
-    badge: "🌍 Eksekusi Dana Pasif",
-    source: "MSCI Inc.",
-    countdownDays: 13,
-    description: "Penyesuaian portofolio dana ETF global pada sesi pre-closing bursa.",
-    pengaruhKeIhsg: "Volume dan nilai transaksi bursa meledak di sesi penutupan.",
-    sektorTerdampak: ["Saham Inclusion MSCI"],
-    tipsAksiTrader: "Take profit pada sesi pre-closing ke dana pasif global yang wajib menyerap likuiditas.",
-  },
-];
 
 /* ── Watchlist Bar (Permanent & Fixed, independent of search & pagination) ── */
 function WatchlistStrip({
@@ -223,12 +137,13 @@ export function StockList() {
 
   const page = Math.max(1, Number(sp.get("page")) || 1);
   const q = sp.get("q") ?? "";
-  const sort = sp.get("sort") ?? "mcap";
+  const explicitSort = sp.get("sort");
   const dir = sp.get("dir") === "asc" ? "asc" : "desc";
   const grupParam = sp.get("grup") ?? "";
 
   const isWatchlistGrup = grupParam === "watchlist";
   const isSwingGrup = grupParam === "swing";
+  const sort = explicitSort ?? (isSwingGrup ? "swing_prob" : "mcap");
   const grup = isWatchlistGrup
     ? "watchlist"
     : GROUPS.some((g) => g.id === grupParam) || grupParam.startsWith("sek:")
@@ -246,7 +161,6 @@ export function StockList() {
   const [searchDraft, setSearchDraft] = useState({ value: q, base: q });
   const search = searchDraft.base === q ? searchDraft.value : q;
   const setSearch = (value: string) => setSearchDraft({ value, base: q });
-  const [sentimentFilter, setSentimentFilter] = useState<{ kodes: string[]; label: string } | null>(null);
   const swingMsciOnly = sp.get("msciOnly") === "1";
   const superOnly = sp.get("super") === "1";
   const setSwingMsciOnly = (active: boolean) => update({ msciOnly: active ? "1" : null, page: null });
@@ -254,26 +168,23 @@ export function StockList() {
   const filterValues = Object.fromEntries(FILTER_PARAMS.flatMap((k) => (sp.get(k) ? [[k, sp.get(k)!]] : [])));
   const filterStr = new URLSearchParams(filterValues).toString();
   const [refreshing, setRefreshing] = useState(false);
-  const [showMarketRadar, setShowMarketRadar] = useState(false);
-  const radarHeading = useRef<HTMLHeadingElement>(null);
-  const [macroEvents, setMacroEvents] = useState<MacroEvent[]>(FALLBACK_MACRO_EVENTS);
+  const { sectorReport, refreshSectors, sentimentFilter, setSentimentFilter, radarOpen: showMarketRadar, setRadarOpen: setShowMarketRadar, radarHeading, openRadar } = useHomeMarket();
+  const [macroEvents, setMacroEvents] = useState<MacroEvent[] | null>(null);
+  const [agendaError, setAgendaError] = useState(false);
   const [selectedMacroEvent, setSelectedMacroEvent] = useState<MacroEvent | null>(null);
-  const [sektor, setSektor] = useState<SectorStat[]>([]);
+  const sektor = sectorReport?.sektor ?? [];
 
   // Dynamic Macro Events fetcher from /api/makro
   useEffect(() => {
-    let cancelled = false;
-    fetch("/api/makro")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((j) => {
-        if (!cancelled && j?.upcomingEvents && Array.isArray(j.upcomingEvents) && j.upcomingEvents.length > 0) {
-          setMacroEvents(j.upcomingEvents.slice(0, 5));
-        }
+    const controller = new AbortController();
+    fetch("/api/makro", { signal: controller.signal })
+      .then(async (r) => {
+        if (!r.ok) throw new Error("Agenda tidak tersedia.");
+        const { upcomingEvents }: { upcomingEvents: MacroEvent[] } = await r.json();
+        if (!controller.signal.aborted) setMacroEvents(upcomingEvents.filter((event) => event.countdownDays >= 0).slice(0, 5));
       })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
+      .catch(() => { if (!controller.signal.aborted) setAgendaError(true); });
+    return () => controller.abort();
   }, []);
 
   /* ── Watchlist data integration ────────────────────────────────────────── */
@@ -299,67 +210,55 @@ export function StockList() {
   }, [watchKey]);
 
   /* ── Paper Trading simulation integration ──────────────────────────────── */
-  const { openTrade, openBatchTrades, openTrades, closeAllTrades } = usePaperTrading();
+  const { openTrade, openBatchTrades, openTrades, closeAllTrades, refreshWithLivePrices, loadingPrices, priceCheckMessage } = usePaperTrading();
   const simulatedSet = useMemo(() => new Set(openTrades.map((t) => t.kode)), [openTrades]);
   const [simToast, setSimToast] = useState<{ msg: string; kode: string } | null>(null);
   const [batchLoading, setBatchLoading] = useState(false);
 
-  const handleCloseBatchInStockList = (mode: "live" | "tp1" | "tp2") => {
+  const handleCloseBatchInStockList = () => {
     if (openTrades.length === 0) return;
 
-    let confirmMsg = "";
-    if (mode === "tp1") {
-      confirmMsg = `Kunci profit TP 1 (+1.5%) untuk SELURUH ${openTrades.length} posisi simulasi aktif?`;
-    } else if (mode === "tp2") {
-      confirmMsg = `Kunci profit TP 2 (+3.0%) untuk SELURUH ${openTrades.length} posisi simulasi aktif?`;
-    } else {
-      confirmMsg = `Tutup SELURUH ${openTrades.length} posisi simulasi aktif pada harga live saat ini?`;
-    }
+    if (!window.confirm(`Tutup semua ${openTrades.length} posisi aktif di harga terakhir yang tercatat?`)) return;
 
-    if (!window.confirm(confirmMsg)) return;
-
-    const res = closeAllTrades(mode);
+    const res = closeAllTrades();
     if (res.count > 0) {
-      if (mode === "tp1") {
-        setSimToast({
-          msg: `🎯 Berhasil menutup ${res.count} posisi di Target TP 1 (+1.5%)! Total Profit Realized: +${rp(res.totalPnlRp)}.`,
-          kode: "TP1",
-        });
-      } else if (mode === "tp2") {
-        setSimToast({
-          msg: `🚀 Berhasil menutup ${res.count} posisi di Target TP 2 (+3.0%)! Total Profit Realized: +${rp(res.totalPnlRp)}.`,
-          kode: "TP2",
-        });
-      } else {
-        setSimToast({
-          msg: `⚡ Berhasil menutup ${res.count} posisi di harga live! Total PnL Realized: ${res.totalPnlRp >= 0 ? "+" : ""}${rp(res.totalPnlRp)}.`,
-          kode: "CLOSE_ALL",
-        });
-      }
+      setSimToast({
+        msg: `${res.count} posisi ditutup manual. Total PnL terealisasi ${res.totalPnlRp >= 0 ? "+" : ""}${rp(res.totalPnlRp)}.`,
+        kode: "CLOSE_ALL",
+      });
       setTimeout(() => setSimToast(null), 8000);
     }
   };
 
-  const handleSimulateBuy = (s: ListItem, score: number | undefined, isMsci: boolean) => {
+  const handleSimulateBuy = (
+    s: Pick<ListItem, "kode" | "nama" | "harga" | "foreign_status">,
+    score: number | undefined,
+    isMsci: boolean,
+    source: "swing" | "news" = "swing",
+  ) => {
     if (!s.harga || s.harga <= 0) return;
     // Dynamic lot calculation targeted around ~Rp 5 - 10 Juta per position
     const recommendedLot = Math.max(5, Math.min(100, Math.round(5_000_000 / (s.harga * 100))));
+    const entry = Math.round(s.harga);
+    const projection = source === "news" ? projectSwingPrices(entry) : null;
 
-    openTrade({
+    const trade = openTrade({
       kode: s.kode,
       nama: s.nama,
       entryPrice: s.harga,
       lot: recommendedLot,
       convictionScore: score,
       isMsci,
-      targetTp1Pct: 1.5,
-      targetTp2Pct: 3.0,
-      stopLossPct: -2.0,
-      notes: `Radar Swing · Skor ${score ?? "belum tersedia"} · Sinyal ${s.foreign_status || "Akumulasi Support"}`,
+      targetTp1Pct: projection ? (projection.tp1 / entry - 1) * 100 : 1.5,
+      targetTp2Pct: projection ? (projection.tp2 / entry - 1) * 100 : 3.0,
+      stopLossPct: projection ? (projection.downside / entry - 1) * 100 : -2.0,
+      notes: source === "news" ? "Radar Berita" : `Radar Swing · Skor ${score ?? "belum tersedia"} · Sinyal ${s.foreign_status || "Akumulasi Support"}`,
     });
 
     setSimToast({
-      msg: `Posisi Paper Trade dibuka untuk ${s.kode} di ${rp(s.harga)} (${recommendedLot} Lot). Target TP1 (+1.5%), TP2 (+3.0%), SL (-2.0%).`,
+      msg: trade
+        ? `Posisi Paper Trade dibuka untuk ${s.kode} di ${rp(trade.entryPrice)} (${recommendedLot} Lot). TP1 ${rp(trade.targetTp1)}, TP2 ${rp(trade.targetTp2)}, SL ${rp(trade.stopLoss)}.`
+        : `Saldo simulasi belum cukup untuk membuka ${recommendedLot} lot ${s.kode}.`,
       kode: s.kode,
     });
 
@@ -412,7 +311,7 @@ export function StockList() {
         });
       } else {
         setSimToast({
-          msg: `Semua saham ${superOnly ? "Super Picks" : "Radar Swing Terkurasi"} saat ini sudah aktif di dalam simulasi.`,
+          msg: "Tidak ada posisi baru. Periksa saldo, harga masuk, dan posisi yang sudah aktif.",
           kode: "INFO",
         });
       }
@@ -423,21 +322,15 @@ export function StockList() {
     }
   };
 
-  useEffect(() => {
-    fetch("/api/pasar")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((j: PasarResponse | null) => j && setSektor(j.sektor))
-      .catch(() => {});
-  }, []);
-
-  const [result, setResult] = useState<{ key: string; data?: ListResponse; error?: string } | null>(null);
-  const key = `${page}|${q}|${sort}|${dir}|${grup}|${isSwingGrup ? (superOnly ? "super" : swingMsciOnly ? "msci" : "all") : ""}|${grup === "watchlist" ? watchKey : ""}|${sentimentFilter ? sentimentFilter.kodes.join(",") : ""}|${filterStr}`;
+  const [result, setResult] = useState<{ key: string; grup: string; data?: ListResponse; error?: string } | null>(null);
+  const key = `${page}|${q}|${explicitSort ?? ""}|${dir}|${grup}|${isSwingGrup ? (superOnly ? "super" : swingMsciOnly ? "msci" : "all") : ""}|${grup === "watchlist" ? watchKey : ""}|${sentimentFilter ? sentimentFilter.kodes.join(",") : ""}|${filterStr}`;
 
   const apiParams = (extra: Record<string, string> = {}) => {
     const p = new URLSearchParams(filterStr);
-    for (const [k, v] of Object.entries({ page: String(page), q, sort, dir, ...extra })) {
+    for (const [k, v] of Object.entries({ page: String(page), q, dir, ...extra })) {
       p.set(k, v);
     }
+    if (explicitSort) p.set("sort", explicitSort);
     if (sentimentFilter && sentimentFilter.kodes.length > 0) {
       p.set("kodes", sentimentFilter.kodes.join(","));
     } else if (grup === "watchlist") {
@@ -453,7 +346,7 @@ export function StockList() {
   };
 
   function update(next: Record<string, string | null>) {
-    const p = new URLSearchParams(sp.toString());
+    const p = new URLSearchParams(window.location.search);
     for (const [k, v] of Object.entries(next)) {
       if (v === null || v === "") p.delete(k);
       else p.set(k, v);
@@ -479,10 +372,10 @@ export function StockList() {
       .then(async (r) => {
         const j = await r.json();
         if (!r.ok) throw new Error(j.error ?? "Gagal mengambil data");
-        setResult({ key, data: j });
+        if (!ctrl.signal.aborted) setResult({ key, grup, data: j });
       })
       .catch((e: unknown) => {
-        if (!ctrl.signal.aborted) setResult({ key, error: e instanceof Error ? e.message : String(e) });
+        if (!ctrl.signal.aborted) setResult({ key, grup, error: e instanceof Error ? e.message : String(e) });
       });
     return () => ctrl.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -518,14 +411,20 @@ export function StockList() {
   useEffect(() => {
     if (!auto) return;
     const params = apiParams();
+    const ctrl = new AbortController();
     const t = setInterval(() => {
       if (document.hidden) return;
-      fetch(`/api/saham?${params}`)
+      fetch(`/api/saham?${params}`, { signal: ctrl.signal })
         .then((r) => (r.ok ? r.json() : null))
-        .then((j: ListResponse | null) => j && setResult({ key, data: j }))
+        .then((j: ListResponse | null) => {
+          if (j && !ctrl.signal.aborted) setResult({ key, grup, data: j });
+        })
         .catch(() => {});
     }, 25_000);
-    return () => clearInterval(t);
+    return () => {
+      clearInterval(t);
+      ctrl.abort();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auto, key]);
 
@@ -536,15 +435,15 @@ export function StockList() {
       const r = await fetch(`/api/saham?${params}`);
       const j = await r.json();
       if (!r.ok) throw new Error(j.error ?? "Gagal menyegarkan data");
-      setResult({ key, data: j });
-      fetch("/api/pasar").then((x) => (x.ok ? x.json() : null)).then((p: PasarResponse | null) => p && setSektor(p.sektor)).catch(() => {});
+      setResult({ key, grup, data: j });
+      void refreshSectors();
     } catch (e) {
-      setResult({ key, error: e instanceof Error ? e.message : String(e) });
+      setResult({ key, grup, error: e instanceof Error ? e.message : String(e) });
     } finally { setRefreshing(false); }
   }
 
   const current = result?.key === key ? result : null;
-  const data = (current ?? result)?.data;
+  const data = (current ?? (result?.grup === grup ? result : null))?.data;
   const loading = !current;
   const updated = data
     ? new Date(data.updatedAt).toLocaleString("id-ID", { dateStyle: "long", timeStyle: "medium" })
@@ -603,11 +502,7 @@ export function StockList() {
             type="button"
             aria-controls="market-radar-panel"
             aria-expanded={showMarketRadar}
-            onClick={() => {
-              setShowMarketRadar(true);
-              radarHeading.current?.focus({ preventScroll: true });
-              radarHeading.current?.scrollIntoView({ block: "start" });
-            }}
+            onClick={() => openRadar()}
             className="control-button ios-glass-pill rounded-full py-2 text-xs font-bold text-zinc-700 dark:text-zinc-200 shadow-xs transition hover:scale-[1.02] active:scale-95"
           >
             Radar Pasar ↓
@@ -733,7 +628,7 @@ export function StockList() {
 
 
       {/* ── Classy Unified Command Bar (iOS Crystal Clear Style) ── */}
-      <div id="screener-table-header" className="ios-glass-canvas flex scroll-mt-32 flex-wrap items-center justify-between gap-3 rounded-3xl p-2 transition-all">
+      <div id="screener-table-header" tabIndex={-1} className="ios-glass-canvas flex scroll-mt-32 flex-wrap items-center justify-between gap-3 rounded-3xl p-2 transition-all focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-500">
         {/* Left: Mode Segmented Switch (iOS Style) */}
         <div className="flex flex-wrap items-center gap-1 rounded-full ios-glass-subtle p-1">
           <button
@@ -844,7 +739,10 @@ export function StockList() {
                   ? grup
                   : ""
               }
-              onChange={(e) => update({ grup: e.target.value || null, page: null })}
+              onChange={(e) => {
+                setSentimentFilter(null);
+                update({ grup: e.target.value || null, page: null });
+              }}
               className={`cursor-pointer appearance-none rounded-full px-3.5 py-1.5 pr-7 text-xs font-semibold outline-none transition ${
                 grup.startsWith("sek:") ||
                 ["utama", "pengembangan", "akselerasi", "ekonomibaru", "pemantauan"].includes(grup)
@@ -857,9 +755,7 @@ export function StockList() {
                 {sektor.map((s) => (
                   <option key={s.nama} value={`sek:${s.nama}`}>
                     {s.nama}{" "}
-                    {s.perubahan_pct !== null
-                      ? `(${s.perubahan_pct >= 0 ? "+" : ""}${num(s.perubahan_pct, 1)}%)`
-                      : ""}
+                    {s.perubahan_pct !== null ? `(${signedPct(s.perubahan_pct, 1)})` : ""}
                   </option>
                 ))}
               </optgroup>
@@ -953,7 +849,7 @@ export function StockList() {
                 </h2>
               </div>
               <p className="text-xs text-zinc-500 dark:text-zinc-400 max-w-2xl leading-relaxed">
-                Skor swing menggabungkan indikator pasar seperti likuiditas dan aliran dana asing. Cut loss tabel memakai acuan 1,5% sebelum pembulatan ke fraksi harga. Posisi baru di simulasi memakai stop loss 2%.
+                Skor swing memakai likuiditas dan proksi arus dari Chaikin Money Flow. Cut loss tabel memakai acuan 1,5%. Posisi baru di simulasi memakai stop loss 2%.
               </p>
             </div>
 
@@ -1019,28 +915,22 @@ export function StockList() {
                     Posisi ({openTrades.length}):
                   </span>
                   <button
-                    onClick={() => handleCloseBatchInStockList("tp1")}
-                    className="rounded-xl bg-white px-2.5 py-1 text-[11px] font-bold text-[#22C55E] hover:bg-zinc-100 dark:bg-[#191919] transition shadow-2xs"
-                    title="Kunci profit target TP 1 (+1.5%)"
+                    onClick={() => refreshWithLivePrices(true)}
+                    disabled={loadingPrices}
+                    className="control-button rounded-xl bg-white px-2.5 py-1 text-xs font-bold text-emerald-800 hover:bg-zinc-100 disabled:opacity-60 dark:bg-[#191919] dark:text-emerald-300 transition shadow-2xs"
                   >
-                    🎯 Close TP 1
+                    {loadingPrices ? "Mengecek…" : "Cek TP/SL"}
                   </button>
                   <button
-                    onClick={() => handleCloseBatchInStockList("tp2")}
-                    className="rounded-xl bg-white px-2.5 py-1 text-[11px] font-bold text-[#22C55E] hover:bg-zinc-100 dark:bg-[#191919] transition shadow-2xs"
-                    title="Kunci profit target TP 2 (+3.0%)"
-                  >
-                    🚀 Close TP 2
-                  </button>
-                  <button
-                    onClick={() => handleCloseBatchInStockList("live")}
+                    onClick={handleCloseBatchInStockList}
                     className="rounded-xl bg-white px-2.5 py-1 text-[11px] font-bold text-[#FB6767] hover:bg-zinc-100 dark:bg-[#191919] transition shadow-2xs"
-                    title="Tutup posisi pada harga live"
+                    title="Tutup semua posisi pada harga terakhir yang tercatat"
                   >
-                    🔴 Close All
+                    Tutup Semua Manual
                   </button>
                 </div>
               )}
+              <span role="status" className="text-xs text-zinc-600 dark:text-zinc-400">{priceCheckMessage}</span>
 
               <Link
                 href="/simulasi"
@@ -1135,7 +1025,7 @@ export function StockList() {
                     let signalLabel = "🎯 Akumulasi Support";
                     let signalBadge = "border-blue-300 bg-blue-50 text-blue-800 dark:border-blue-900 dark:bg-blue-950/50 dark:text-blue-300";
                     if (s.foreign_status?.includes("Akumulasi") || (s.foreign_flow && s.foreign_flow > 500_000_000)) {
-                      signalLabel = "🌊 Akumulasi Asing";
+                      signalLabel = "🌊 Akumulasi (CMF)";
                       signalBadge = "border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/50 dark:text-emerald-300";
                     } else if (s.perubahan_pct !== null && s.perubahan_pct > 0 && s.perubahan_pct <= 2.5) {
                       signalLabel = "⚡ Pantulan Rebound";
@@ -1582,17 +1472,15 @@ export function StockList() {
         <div id="market-radar-panel" hidden={!showMarketRadar}>
           {showMarketRadar && (
             <div className="grid grid-cols-1 xl:grid-cols-12 gap-5 items-start">
-              {/* Left: Dynamic AI Sentiment & Buy Recommendations (8 cols) */}
               <div className="xl:col-span-8">
                 <NewsSentimentRecommendations
-                  universeItems={data?.items || []}
                   onFilterTableKodes={(kodes, label) => {
                     setSentimentFilter({ kodes, label });
                     const el = document.getElementById("screener-table-header");
                     if (el) el.scrollIntoView({ behavior: "smooth" });
                   }}
-                  onSimulateBuy={handleSimulateBuy}
-                  activeFilterLabel={sentimentFilter?.label}
+                  onSimulateBuy={(item) => handleSimulateBuy(item, undefined, false, "news")}
+                  activeFilter={sentimentFilter}
                   onClearFilter={() => setSentimentFilter(null)}
                 />
               </div>
@@ -1621,7 +1509,10 @@ export function StockList() {
                   </div>
 
                   <div className="space-y-2">
-                    {macroEvents.map((evt) => {
+                    {agendaError ? <p role="status" className="text-xs text-zinc-600 dark:text-zinc-400">Agenda tidak tersedia.</p>
+                      : macroEvents === null ? <p role="status" className="text-xs text-zinc-600 dark:text-zinc-400">Memuat agenda…</p>
+                      : macroEvents.length === 0 && <p className="text-xs text-zinc-600 dark:text-zinc-400">Belum ada agenda mendatang.</p>}
+                    {macroEvents?.map((evt) => {
                       const picks = evt.sahamPilihan || [];
                       const displayCountdown =
                         evt.countdownDays === 0

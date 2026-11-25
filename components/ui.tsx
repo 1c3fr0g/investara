@@ -48,6 +48,7 @@ function SiteHeaderContent() {
         { href: "/crypto", label: "Daftar Kripto", active: pathname === "/crypto" },
         { href: "/crypto/heatmap", label: "Peta Panas", active: pathname === "/crypto/heatmap" },
         { href: "/crypto/bandingkan", label: "Bandingkan", active: pathname === "/crypto/bandingkan" },
+        { href: "/crypto/portofolio", label: "Portofolio", active: pathname === "/crypto/portofolio" },
       ]
     : [
         {
@@ -59,7 +60,7 @@ function SiteHeaderContent() {
         {
           href: "/",
           label: "📊 Screener",
-          active: pathname === "/" && !currentGrup,
+          active: pathname === "/" && currentGrup !== "swing",
         },
         {
           href: "/simulasi",
@@ -128,13 +129,13 @@ function SiteHeaderContent() {
         </div>
 
         {/* CENTER: Segmented Nav */}
-        <nav aria-label="Navigasi utama" className="hidden xl:flex items-center gap-1 rounded-full ios-glass-subtle p-1 shrink-0">
+        <nav aria-label="Navigasi utama" className="ios-glass-subtle hidden shrink-0 items-center justify-center gap-0.5 rounded-full p-1 xl:flex">
           {navItems.map((item) => (
             <Link
               key={item.href}
               href={item.href}
               aria-current={item.active ? (item.href.split("?")[0] === pathname ? "page" : "location") : undefined}
-              className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-bold whitespace-nowrap shrink-0 transition ${
+              className={`flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-xs font-bold whitespace-nowrap shrink-0 transition ${
                 item.active
                   ? "crystal-active"
                   : "text-zinc-600 hover:text-[#191919] dark:text-zinc-300 dark:hover:text-white"
@@ -157,7 +158,7 @@ function SiteHeaderContent() {
         </nav>
 
         {/* RIGHT: Utilities */}
-        <div className="hidden xl:flex items-center gap-2 shrink-0">
+        <div className="hidden min-w-0 items-center gap-1.5 xl:flex">
           {/* Command Palette ⌘K */}
           <button
             type="button"
@@ -195,14 +196,14 @@ function SiteHeaderContent() {
           {/* Divider */}
           <div className="h-5 w-px bg-zinc-300/60 dark:bg-white/10 mx-0.5 shrink-0" />
 
-          <div className="shrink-0 flex items-center gap-1.5">
+          <div className="flex min-w-0 items-center gap-1.5">
             <ThemeToggle />
             <AuthMenu />
           </div>
         </div>
 
         {/* Mobile Action Controls */}
-        <div className="flex shrink-0 items-center gap-1 xl:hidden">
+        <div className="flex min-w-0 items-center gap-1 xl:hidden">
           {/* Mobile Command Palette */}
           <button
             type="button"

@@ -58,7 +58,7 @@ export function AlertManager({ initialCode }: { initialCode: string }) {
     );
   }
 
-  return <AlertView key={initialCode} initialCode={initialCode} />;
+  return <AlertView key={data.user.id + ":" + initialCode} initialCode={initialCode} />;
 }
 
 function AlertView({ initialCode }: { initialCode: string }) {
@@ -70,19 +70,29 @@ function AlertView({ initialCode }: { initialCode: string }) {
   const [catatan, setCatatan] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [listError, setListError] = useState("");
+  const [pendingAction, setPendingAction] = useState<string | null>(null);
 
-  const loadAlerts = () => {
-    fetch("/api/alerts")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((j: { items?: AlertItem[] } | null) => {
-        if (j?.items) setAlerts(j.items);
+  const loadAlerts = (signal?: AbortSignal) =>
+    fetch("/api/alerts", { signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error("Gagal memuat daftar alert.");
+        const { items }: { items: AlertItem[] } = await response.json();
+        if (signal?.aborted) return;
+        setAlerts(items);
+        setListError("");
       })
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  };
+      .catch(() => {
+        if (!signal?.aborted) setListError("Gagal memuat daftar alert.");
+      })
+      .finally(() => {
+        if (!signal?.aborted) setLoading(false);
+      });
 
   useEffect(() => {
-    loadAlerts();
+    const controller = new AbortController();
+    void loadAlerts(controller.signal);
+    return () => controller.abort();
   }, []);
 
   async function handleCreate(e: React.FormEvent) {
@@ -116,18 +126,36 @@ function AlertView({ initialCode }: { initialCode: string }) {
   }
 
   async function toggleAktif(id: string, current: number) {
-    const next = current === 1 ? false : true;
-    await fetch("/api/alerts", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id, aktif: next }),
-    });
-    setAlerts((prev) => prev.map((a) => (a.id === id ? { ...a, aktif: next ? 1 : 0 } : a)));
+    if (pendingAction) return;
+    setPendingAction(id);
+    try {
+      const response = await fetch("/api/alerts", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, aktif: current !== 1 }),
+      });
+      if (!response.ok) throw new Error("Gagal mengubah alert.");
+      await loadAlerts();
+    } catch {
+      setListError("Status alert gagal diubah.");
+    } finally {
+      setPendingAction(null);
+    }
   }
 
   async function handleDelete(id: string) {
-    const res = await fetch(`/api/alerts?id=${encodeURIComponent(id)}`, { method: "DELETE" });
-    if (res.ok) setAlerts((prev) => prev.filter((a) => a.id !== id));
+    if (pendingAction) return;
+    setPendingAction(id);
+    try {
+      const response = await fetch(`/api/alerts?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+      if (!response.ok) throw new Error("Gagal menghapus alert.");
+      setAlerts((prev) => prev.filter((a) => a.id !== id));
+      setListError("");
+    } catch {
+      setListError("Alert gagal dihapus.");
+    } finally {
+      setPendingAction(null);
+    }
   }
 
   const triggeredCount = alerts.filter((a) => a.aktif === 1 && a.triggered === 1).length;
@@ -266,6 +294,10 @@ function AlertView({ initialCode }: { initialCode: string }) {
           <h2 className="font-bold text-zinc-950 dark:text-zinc-100">Daftar Alert Terpasang</h2>
         </div>
 
+        {listError && <div className="flex flex-wrap items-center gap-2 p-4 text-sm">
+          <p role="alert">{listError}</p>
+          <button type="button" onClick={() => void loadAlerts()} className="control-button ios-glass-pill rounded-xl font-semibold">Muat ulang</button>
+        </div>}
         {loading ? (
           <div className="p-8 text-center text-sm text-zinc-500">Memuat alert...</div>
         ) : alerts.length === 0 ? (
@@ -346,12 +378,14 @@ function AlertView({ initialCode }: { initialCode: string }) {
                       <td className="px-4 py-3 text-center">
                         <div className="flex items-center justify-center gap-2">
                           <button
+                            disabled={pendingAction !== null}
                             onClick={() => toggleAktif(a.id, a.aktif)}
                             className="rounded-lg border border-zinc-200 px-2 py-1 text-xs hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
                           >
                             {a.aktif === 1 ? "Matikan" : "Nyalakan"}
                           </button>
                           <button
+                            disabled={pendingAction !== null}
                             onClick={() => handleDelete(a.id)}
                             className="rounded-lg p-1 text-zinc-400 hover:text-rose-600 dark:hover:text-rose-400"
                             title="Hapus alert"

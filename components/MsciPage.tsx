@@ -27,7 +27,8 @@ export function MsciPage() {
   // Fetch stocks universe
   const fetchData = (isBackground = false) => {
     if (!isBackground) setLoading(true);
-    fetch("/api/saham?size=300")
+    const query = new URLSearchParams({ kodes: MSCI_ALL.join(","), size: String(MSCI_ALL.length) });
+    fetch(`/api/saham?${query}`)
       .then(async (res) => {
         if (!res.ok) throw new Error("Gagal mengambil data saham");
         return res.json();
@@ -35,6 +36,7 @@ export function MsciPage() {
       .then((data) => {
         if (data?.items && Array.isArray(data.items)) {
           setItems(data.items);
+          setError(null);
         }
       })
       .catch((err) => {
@@ -94,11 +96,14 @@ export function MsciPage() {
   }, [items, allMsciSet]);
 
   // Aggregate Stats
-  const totalMcap = useMemo(() => {
-    return items
-      .filter((s) => activeCodes.has(s.kode))
-      .reduce((acc, curr) => acc + (curr.mcap ?? 0), 0);
-  }, [items, activeCodes]);
+  const totalsBySector = new Map<string, number>();
+  let totalMcap = 0;
+  for (const item of items) {
+    if (!allMsciSet.has(item.kode) || item.mcap == null || item.mcap <= 0) continue;
+    totalMcap += item.mcap;
+    if (item.sektor) totalsBySector.set(item.sektor, (totalsBySector.get(item.sektor) ?? 0) + item.mcap);
+  }
+  const largestSector = [...totalsBySector].sort((a, b) => b[1] - a[1])[0];
 
   const openAiChatForStock = (kode: string) => {
     window.dispatchEvent(
@@ -122,7 +127,7 @@ export function MsciPage() {
             Klasifikasi &amp; Indeks MSCI Indonesia
           </h1>
           <p className="mt-1 max-w-2xl text-xs sm:text-sm text-zinc-600 dark:text-zinc-400">
-            Daftar resmi saham Bursa Efek Indonesia yang masuk dalam indeks global MSCI. Menjadi acuan alokasi portofolio manajer investasi global, ETF asing (EIDO), dan motor penggerak arus modal asing (*foreign flow*).
+            Daftar konstituen acuan Investara dan harga dari penyedia. Perubahan keanggotaan mengikuti pengumuman MSCI.
           </p>
         </div>
 
@@ -151,7 +156,7 @@ export function MsciPage() {
             </span>
           </div>
           <p className="mt-1 text-[11px] text-zinc-400">
-            25 Standard (Large/Mid) + 58 Small Cap
+            {MSCI_STANDARD.length} Standard + {MSCI_SMALLCAP.length} Small Cap
           </p>
         </Card>
 
@@ -159,11 +164,11 @@ export function MsciPage() {
           <span className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">Total Market Cap Terpantau</span>
           <div className="mt-1 flex items-baseline gap-2">
             <span className="text-xl sm:text-2xl font-black text-emerald-600 dark:text-emerald-400">
-              {totalMcap > 0 ? `Rp ${(totalMcap / 1e12).toFixed(1)} T` : "Rp 8.420+ T"}
+              {totalMcap > 0 ? `Rp ${(totalMcap / 1e12).toFixed(1)} T` : "Belum tersedia"}
             </span>
           </div>
           <p className="mt-1 text-[11px] text-zinc-400">
-            &gt; 72% dari total kapitalisasi pasar BEI
+            Kapitalisasi emiten acuan yang tersedia
           </p>
         </Card>
 
@@ -171,26 +176,26 @@ export function MsciPage() {
           <span className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">Pilar Sektor Terbesar</span>
           <div className="mt-1 flex items-baseline gap-2">
             <span className="text-xl sm:text-2xl font-black text-zinc-900 dark:text-zinc-100">
-              Keuangan
+              {largestSector?.[0] ?? "Belum tersedia"}
             </span>
             <span className="text-xs font-bold text-zinc-500 dark:text-zinc-400">
-              (~54%)
+              {largestSector && totalMcap > 0 ? `${(largestSector[1] / totalMcap * 100).toLocaleString("id-ID", { maximumFractionDigits: 1 })}%` : ""}
             </span>
           </div>
           <p className="mt-1 text-[11px] text-zinc-400">
-            BBCA, BBRI, BMRI, BBNI porsi dominan
+            Porsi dari kapitalisasi yang tersedia
           </p>
         </Card>
 
         <Card className="p-4 sm:p-5 rounded-2xl">
-          <span className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">Jadwal Review Terdekat</span>
+          <span className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">Siklus Review</span>
           <div className="mt-1 flex items-baseline gap-2">
             <span className="text-lg sm:text-xl font-black text-amber-600 dark:text-amber-400">
-              Mei (SAIR)
+              Kuartalan
             </span>
           </div>
           <p className="mt-1 text-[11px] text-zinc-400">
-            Semi-Annual Rebalancing Evaluasi Mayor
+            Lihat rincian di tab jadwal rebalancing
           </p>
         </Card>
       </div>

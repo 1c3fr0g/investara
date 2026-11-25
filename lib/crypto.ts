@@ -1,4 +1,5 @@
 import YahooFinance from "yahoo-finance2";
+import { USD_TO_IDR } from "./cryptoCurrency";
 import type {
   CryptoCategory,
   CryptoDetailData,
@@ -11,7 +12,7 @@ import type {
 const yf = new YahooFinance({ suppressNotices: ["yahooSurvey"] });
 const OPTS = { validateResult: false } as const;
 
-export const USD_TO_IDR = 15850;
+export { USD_TO_IDR } from "./cryptoCurrency";
 
 // Curated Top 35 Cryptocurrencies
 interface RawCryptoDef {
@@ -1031,10 +1032,10 @@ function timestamp(value: unknown) {
 }
 
 async function fetchSpot(symbol?: string): Promise<SpotQuote[]> {
-  const url = new URL("https://api.binance.com/api/v3/ticker/24hr");
+  const url = new URL("https://data-api.binance.vision/api/v3/ticker/24hr");
   if (symbol) url.searchParams.set("symbol", symbol + "USDT");
   try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(3_500) });
+    const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(3_500) });
     if (!response.ok) return [];
     const body = await response.json();
     return Array.isArray(body) ? body : [body];
@@ -1092,7 +1093,7 @@ const cryptoMetadata = new Map(RAW_CRYPTOS.map((coin) => [coin.symbol, coin]));
 let cachedYahoo: { fetchedAt: number; quotes: ProviderQuote[] } | null = null;
 
 async function yahooQuotes(): Promise<ProviderQuote[]> {
-  if (cachedYahoo && Date.now() - cachedYahoo.fetchedAt < 5 * 60_000) return cachedYahoo.quotes;
+  if (cachedYahoo && Date.now() - cachedYahoo.fetchedAt < (cachedYahoo.quotes.length ? 5 * 60_000 : 15_000)) return cachedYahoo.quotes;
   const result = await yf.quote(RAW_CRYPTOS.map(({ symbol }) => symbol + "-USD"), {}, {
     ...OPTS, fetchOptions: { signal: AbortSignal.timeout(4_000) },
   }).catch(() => []);

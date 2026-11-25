@@ -8,5 +8,13 @@
       "path": "/api/internal/alerts/sweep",
       "schedule": "0 9 * * 1-5"
     }
-  ]
+  ],
+  "schedules": {
+    "paper-trading-sweep": {
+      "schedule": "*/15 9-16 * * 1-5",
+      "timezone": "Asia/Jakarta",
+      "path": "/api/internal/simulasi/sweep",
+      "requestMethod": "GET"
+    }
+  }
 }

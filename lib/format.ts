@@ -6,6 +6,7 @@ export const dash = "-";
 export const rp = (v: number | null | undefined) => (v == null ? dash : "Rp " + nf(Math.round(v)));
 export const num = (v: number | null | undefined, d = 2) => (v == null ? dash : nf(v, d));
 export const pct = (v: number | null | undefined, d = 2) => (v == null ? dash : nf(v, d) + "%");
+export const signedPct = (v: number | null | undefined, d = 2) => (v == null ? dash : (v >= 0 ? "+" : "") + pct(v, d));
 
 export function compact(v: number | null | undefined) {
   if (v == null) return dash;

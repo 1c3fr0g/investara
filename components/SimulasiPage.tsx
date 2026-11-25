@@ -12,18 +12,15 @@ import { PriceFlash } from "./PriceFlash";
 import { rp, num, pct, compact } from "@/lib/format";
 import { Card } from "./ui";
 import { SwingCalendar } from "./SwingCalendar";
+import { useOfflinePaperTrading } from "./OfflinePaperTrading";
 
 const POPULAR_TICKERS = [
-  { kode: "BBCA", nama: "Bank Central Asia Tbk", defaultPrice: 10250 },
-  { kode: "BBRI", nama: "Bank Rakyat Indonesia Tbk", defaultPrice: 4750 },
-  { kode: "BMRI", nama: "Bank Mandiri Tbk", defaultPrice: 6600 },
-  { kode: "BBNI", nama: "Bank Negara Indonesia Tbk", defaultPrice: 5300 },
-  { kode: "TLKM", nama: "Telkom Indonesia Tbk", defaultPrice: 2880 },
-  { kode: "ASII", nama: "Astra International Tbk", defaultPrice: 5050 },
-  { kode: "BRIS", nama: "Bank Syariah Indonesia Tbk", defaultPrice: 3000 },
-  { kode: "ADRO", nama: "Adaro Energy Indonesia Tbk", defaultPrice: 3750 },
-  { kode: "AMMN", nama: "Amman Mineral Internasional Tbk", defaultPrice: 8900 },
-  { kode: "MEDC", nama: "Medco Energi Internasional Tbk", defaultPrice: 1250 },
+  { kode: "BBCA", nama: "Bank Central Asia Tbk" },
+  { kode: "BBRI", nama: "Bank Rakyat Indonesia Tbk" },
+  { kode: "BMRI", nama: "Bank Mandiri Tbk" },
+  { kode: "BBNI", nama: "Bank Negara Indonesia Tbk" },
+  { kode: "TLKM", nama: "Telkom Indonesia Tbk" },
+  { kode: "ASII", nama: "Astra International Tbk" },
 ];
 
 export function SimulasiPage() {
@@ -38,13 +35,14 @@ export function SimulasiPage() {
     closeAllTrades,
     deleteTrade,
     resetTrades,
-    restoreDefaultSeedTrades,
     setStartingBalance,
     refreshWithLivePrices,
     loadingPrices,
+    priceCheckMessage,
     openTrade,
     openBatchTrades,
   } = usePaperTrading({ autoPoll: true, pollIntervalMs: 30000 });
+  const offline = useOfflinePaperTrading();
 
   const [viewMode, setViewMode] = useState<"calendar" | "table">("calendar");
   const [activeTab, setActiveTab] = useState<"all" | "open" | "closed">("all");
@@ -85,7 +83,7 @@ export function SimulasiPage() {
       if (count > 0) {
         setBatchToast(`🎉 ${count} Saham Terkurasi (Super Picks + Pilihan Utama) hari ini (${todayStr}) berhasil dimasukkan! Posisi siap dievaluasi.`);
       } else {
-        setBatchToast(`Semua saham radar swing terkurasi saat ini sudah aktif di dalam simulasi.`);
+        setBatchToast("Tidak ada posisi baru. Periksa saldo, harga masuk, dan posisi yang sudah aktif.");
       }
       setTimeout(() => setBatchToast(null), 8000);
     } catch (e) {
@@ -95,37 +93,23 @@ export function SimulasiPage() {
     }
   };
 
-  const handleCloseBatch = (mode: "live" | "tp1" | "tp2") => {
+  const handleCloseBatch = () => {
     if (openTrades.length === 0) return;
 
-    let confirmMsg = "";
-    if (mode === "tp1") {
-      confirmMsg = `Kunci profit TP 1 (+1.5%) untuk SELURUH ${openTrades.length} posisi aktif?`;
-    } else if (mode === "tp2") {
-      confirmMsg = `Kunci profit TP 2 (+3.0%) untuk SELURUH ${openTrades.length} posisi aktif?`;
-    } else {
-      confirmMsg = `Tutup SELURUH ${openTrades.length} posisi aktif pada harga live saat ini?`;
-    }
+    if (!window.confirm(`Tutup semua ${openTrades.length} posisi aktif di harga terakhir yang tercatat?`)) return;
 
-    if (!window.confirm(confirmMsg)) return;
-
-    const res = closeAllTrades(mode);
+    const res = closeAllTrades();
     if (res.count > 0) {
-      if (mode === "tp1") {
-        setBatchToast(`🎯 Sukses menutup ${res.count} posisi di Target TP 1 (+1.5%)! Total Realized Profit: +${rp(res.totalPnlRp)}.`);
-      } else if (mode === "tp2") {
-        setBatchToast(`🚀 Sukses menutup ${res.count} posisi di Target TP 2 (+3.0%)! Total Realized Profit: +${rp(res.totalPnlRp)}.`);
-      } else {
-        setBatchToast(`⚡ Sukses menutup ${res.count} posisi di harga live! Total Realized PnL: ${res.totalPnlRp >= 0 ? "+" : ""}${rp(res.totalPnlRp)}.`);
-      }
+      setBatchToast(`${res.count} posisi ditutup manual. Total PnL terealisasi ${res.totalPnlRp >= 0 ? "+" : ""}${rp(res.totalPnlRp)}.`);
       setTimeout(() => setBatchToast(null), 8000);
     }
   };
 
   // Form states for adding simulated trade
   const [inputKode, setInputKode] = useState("BBRI");
-  const [inputNama, setInputNama] = useState("Bank Rakyat Indonesia Tbk");
-  const [inputPrice, setInputPrice] = useState(4750);
+  const [inputPrice, setInputPrice] = useState<number | "">("");
+  const [entryError, setEntryError] = useState("");
+  const entryPrice = Number(inputPrice);
   const [inputLot, setInputLot] = useState(10);
   const [inputTp1Pct, setInputTp1Pct] = useState(1.5);
   const [inputTp2Pct, setInputTp2Pct] = useState(3.0);
@@ -136,21 +120,20 @@ export function SimulasiPage() {
   // Form states for settings modal
   const [customBalance, setCustomBalance] = useState(summary.startingBalance);
 
-  // Selection change helper
-  const handleSelectPopular = (item: (typeof POPULAR_TICKERS)[0]) => {
-    setInputKode(item.kode);
-    setInputNama(item.nama);
-    setInputPrice(item.defaultPrice);
+  const changeTicker = (kode: string) => {
+    setInputKode(kode);
+    setInputPrice("");
   };
 
   const handleCreateTrade = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inputKode || inputPrice <= 0 || inputLot <= 0) return;
+    const kode = inputKode.trim().toUpperCase();
+    if (!/^[A-Z0-9]{4}$/.test(kode) || !Number.isFinite(entryPrice) || entryPrice <= 0 || inputLot <= 0) return;
 
-    openTrade({
-      kode: inputKode.trim().toUpperCase(),
-      nama: inputNama.trim() || `${inputKode.trim().toUpperCase()} Tbk`,
-      entryPrice: inputPrice,
+    const trade = openTrade({
+      kode,
+      nama: POPULAR_TICKERS.find((item) => item.kode === kode)?.nama ?? `${kode} Tbk`,
+      entryPrice,
       lot: inputLot,
       targetTp1Pct: inputTp1Pct,
       targetTp2Pct: inputTp2Pct,
@@ -159,6 +142,12 @@ export function SimulasiPage() {
       notes: inputNotes,
     });
 
+    if (!trade) {
+      setEntryError("Posisi gagal dibuka. Periksa saldo, jumlah lot, serta urutan TP dan SL.");
+      return;
+    }
+    setEntryError("");
+    setInputPrice("");
     setShowAddModal(false);
   };
 
@@ -212,7 +201,7 @@ export function SimulasiPage() {
       {/* ── Top Hero Header (Satoshi Clean Style) ── */}
       <div className="crystal-intro relative overflow-hidden">
         <div className="relative z-10 flex flex-col justify-between gap-4 lg:flex-row lg:items-center">
-          <div className="max-w-3xl space-y-2">
+          <div className="min-w-0 max-w-3xl space-y-2">
             <div className="inline-flex items-center gap-2 rounded-full bg-[#9A83FF]/15 px-3 py-1 text-xs font-bold text-[#9A83FF] backdrop-blur-md dark:bg-[#9A83FF]/25">
               <span className="text-sm">🧪</span> Laboratorium Validasi Real-Time (Tanpa Risiko)
             </div>
@@ -225,16 +214,31 @@ export function SimulasiPage() {
               <strong>TP2 (+3.0%)</strong>, dan pembatas risiko <strong>Stop Loss (-2.0%)</strong>{" "}
               mengikuti pergerakan harga live IHSG.
             </p>
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-600 dark:text-zinc-300">
+              {offline.state === "guest" && <Link className="underline underline-offset-4" href="/portofolio">Masuk untuk pantau offline</Link>}
+              {offline.state !== "loading" && offline.state !== "guest" && (
+                <button type="button" onClick={offline.sync} disabled={offline.state === "syncing"}
+                  className="control-button min-h-11 max-w-full rounded-xl border border-zinc-200 bg-white/70 font-semibold text-zinc-800 disabled:opacity-60 dark:border-white/10 dark:bg-white/10 dark:text-zinc-100">
+                  {offline.state === "syncing" ? "Menyinkronkan…" : offline.state === "off" ? "Pantau offline" : "Sinkronkan lagi"}
+                </button>
+              )}
+              <span role="status">
+                {offline.state === "syncing" && "Menyimpan posisi simulasi ke akunmu."}
+                {offline.state === "ready" && "Tersinkron · Cek TP dan SL tiap 15 menit, Senin–Jumat, 09.00–16.45 WIB."}
+                {offline.state === "error" && "Sinkronisasi gagal. Coba lagi sebelum menutup halaman."}
+                {offline.state === "off" && "Simpan target posisi terbuka ke akunmu agar server bisa memeriksanya saat browser ditutup."}
+              </span>
+            </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5">
             <button
               onClick={() => refreshWithLivePrices(true)}
-              disabled={loadingPrices}
+              disabled={loadingPrices || openTrades.length === 0}
               className="control-button rounded-xl border border-zinc-200 bg-white/90 py-2 text-xs font-bold text-zinc-800 shadow-2xs backdrop-blur-xl transition hover:bg-white hover:border-zinc-300 disabled:opacity-60 dark:border-white/10 dark:bg-zinc-800 dark:text-zinc-200"
             >
               <span className={loadingPrices ? "animate-spin" : ""}>🔄</span>
-              <span>{loadingPrices ? "Mengecek..." : "Cek Harga Live"}</span>
+              <span>{loadingPrices ? "Mengecek…" : "Cek TP/SL"}</span>
             </button>
 
             <button
@@ -263,6 +267,7 @@ export function SimulasiPage() {
               <span>⚙️</span>
             </button>
           </div>
+          <p role="status" className="text-xs text-zinc-600 dark:text-zinc-400">{priceCheckMessage}</p>
         </div>
       </div>
 
@@ -383,7 +388,7 @@ export function SimulasiPage() {
             Profit Factor
           </div>
           <div className="mt-1 text-xl font-black tracking-tight text-[#22C55E] tabular-nums">
-            {summary.profitFactor > 0 ? `${summary.profitFactor}x` : "-"}
+            {summary.profitFactor === Infinity ? "∞" : summary.closedTradesCount ? `${summary.profitFactor}x` : "-"}
           </div>
           <div className="mt-1 text-[10px] text-zinc-500 dark:text-zinc-400">
             Rasio Laba / Rugi Kotor
@@ -518,28 +523,12 @@ export function SimulasiPage() {
                   Aksi Massal:
                 </span>
                 <button
-                  onClick={() => handleCloseBatch("tp1")}
-                  className="inline-flex items-center gap-1 rounded-xl bg-teal-600 hover:bg-teal-700 px-3 py-1.5 text-xs font-bold text-white shadow-2xs transition active:scale-95"
-                  title="Tutup seluruh posisi aktif pada target TP 1 (+1.5%)"
-                >
-                  <span>🎯</span>
-                  <span>Close TP 1 ({openTrades.length})</span>
-                </button>
-                <button
-                  onClick={() => handleCloseBatch("tp2")}
-                  className="inline-flex items-center gap-1 rounded-xl bg-emerald-600 hover:bg-emerald-700 px-3 py-1.5 text-xs font-bold text-white shadow-2xs transition active:scale-95"
-                  title="Tutup seluruh posisi aktif pada target TP 2 (+3.0%)"
-                >
-                  <span>🚀</span>
-                  <span>Close TP 2 ({openTrades.length})</span>
-                </button>
-                <button
-                  onClick={() => handleCloseBatch("live")}
+                  onClick={handleCloseBatch}
                   className="inline-flex items-center gap-1 rounded-xl border border-rose-300 bg-rose-50 hover:bg-rose-100 px-3 py-1.5 text-xs font-bold text-rose-800 dark:border-rose-800 dark:bg-rose-950/60 dark:text-rose-300 transition active:scale-95"
-                  title="Tutup seluruh posisi aktif pada harga live saat ini"
+                  title="Tutup semua posisi pada harga terakhir yang tercatat"
                 >
                   <span>🔴</span>
-                  <span>Close All Position</span>
+                  <span>Tutup Semua Manual</span>
                 </button>
               </div>
             )}
@@ -551,12 +540,12 @@ export function SimulasiPage() {
                 <tr>
                   <th className="px-4 py-3">Emiten</th>
                   <th className="px-4 py-3 text-right">Entry (Beli)</th>
-                  <th className="px-4 py-3 text-right">Harga Live</th>
+                  <th className="px-4 py-3 text-right">Harga Tercatat</th>
                   <th className="px-4 py-3 text-right">Floating PnL</th>
                   <th className="px-4 py-3 text-center">Target TP1 / TP2</th>
                   <th className="px-4 py-3 text-center">Stop Loss</th>
                   <th className="px-4 py-3 text-center">Peluang Sukses</th>
-                  <th className="px-4 py-3 text-center">Aksi Tutup / TP</th>
+                  <th className="px-4 py-3 text-center">Aksi</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-200/60 dark:divide-white/[0.06]">
@@ -689,25 +678,11 @@ export function SimulasiPage() {
                       <td className="px-4 py-3.5 text-center">
                         <div className="flex items-center justify-center gap-1.5 flex-wrap">
                           <button
-                            onClick={() => closeTrade(t.id, t.targetTp1, "TP1_HIT")}
-                            className="rounded-lg bg-teal-600 px-2.5 py-1 text-[11px] font-bold text-white shadow-2xs transition hover:bg-teal-700 active:scale-95"
-                            title="Kunci profit pada target TP1 (+1.5%)"
-                          >
-                            Ambil TP1
-                          </button>
-                          <button
-                            onClick={() => closeTrade(t.id, t.targetTp2, "TP2_HIT")}
-                            className="rounded-lg bg-emerald-600 px-2.5 py-1 text-[11px] font-bold text-white shadow-2xs transition hover:bg-emerald-700 active:scale-95"
-                            title="Kunci profit maksimal pada target TP2 (+3.0%)"
-                          >
-                            Ambil TP2
-                          </button>
-                          <button
-                            onClick={() => closeTrade(t.id, curr, "CLOSED")}
+                            onClick={() => closeTrade(t.id)}
                             className="rounded-lg border border-zinc-200 bg-white px-2 py-1 text-[11px] font-semibold text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 active:scale-95"
-                            title="Tutup posisi di harga live saat ini"
+                            title="Tutup posisi pada harga terakhir yang tercatat"
                           >
-                            Tutup Live
+                            Tutup Manual
                           </button>
                           <button
                             onClick={() => deleteTrade(t.id)}
@@ -953,17 +928,18 @@ export function SimulasiPage() {
             </div>
 
             <form onSubmit={handleCreateTrade} className="mt-4 space-y-4">
+              {entryError && <p role="alert" className="text-sm text-rose-700 dark:text-rose-300">{entryError}</p>}
               {/* Popular Ticker Quick Selector */}
               <div>
                 <label className="block text-[11px] font-bold uppercase tracking-wider text-zinc-400 mb-1.5">
                   Pilihan Saham Likuid:
                 </label>
                 <div className="flex flex-wrap gap-1.5">
-                  {POPULAR_TICKERS.slice(0, 6).map((item) => (
+                  {POPULAR_TICKERS.map((item) => (
                     <button
                       type="button"
                       key={item.kode}
-                      onClick={() => handleSelectPopular(item)}
+                      onClick={() => changeTicker(item.kode)}
                       className={`rounded-lg px-2.5 py-1 text-xs font-semibold transition ${
                         inputKode === item.kode
                           ? "bg-emerald-600 text-white font-bold"
@@ -978,27 +954,30 @@ export function SimulasiPage() {
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1">
+                  <label htmlFor="paper-entry-code" className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1">
                     Kode Saham
                   </label>
                   <input
                     type="text"
+                    id="paper-entry-code"
                     value={inputKode}
-                    onChange={(e) => setInputKode(e.target.value.toUpperCase())}
+                    onChange={(e) => changeTicker(e.target.value.toUpperCase())}
                     className="w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm font-bold uppercase text-zinc-900 focus:border-emerald-500 focus:outline-hidden dark:border-zinc-700 dark:bg-zinc-800/80 dark:text-white"
                     placeholder="BBCA"
+                    pattern="[A-Z0-9]{4}"
                     required
                   />
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1">
-                    Harga Beli (Entry)
+                  <label htmlFor="paper-entry-price" className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1">
+                    Harga Beli Manual (Rp)
                   </label>
                   <input
                     type="number"
+                    id="paper-entry-price"
                     value={inputPrice}
-                    onChange={(e) => setInputPrice(Number(e.target.value))}
+                    onChange={(e) => setInputPrice(e.target.value === "" ? "" : e.target.valueAsNumber)}
                     className="w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm font-bold text-zinc-900 focus:border-emerald-500 focus:outline-hidden dark:border-zinc-700 dark:bg-zinc-800/80 dark:text-white"
                     min="1"
                     required
@@ -1026,7 +1005,7 @@ export function SimulasiPage() {
                     Total Modal Dialokasikan
                   </label>
                   <div className="rounded-xl border border-zinc-200 bg-zinc-100/70 px-3 py-2 text-sm font-bold text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800/40 dark:text-zinc-100">
-                    {rp(inputLot * 100 * inputPrice)}
+                    {inputPrice === "" ? "—" : rp(inputLot * 100 * entryPrice)}
                   </div>
                 </div>
               </div>
@@ -1045,7 +1024,7 @@ export function SimulasiPage() {
                     className="w-full rounded-lg border border-zinc-200 bg-white px-2 py-1 text-xs font-bold text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-white"
                   />
                   <span className="text-[10px] text-zinc-400">
-                    {rp(Math.round(inputPrice * (1 + inputTp1Pct / 100)))}
+                    {inputPrice === "" ? "—" : rp(Math.round(entryPrice * (1 + inputTp1Pct / 100)))}
                   </span>
                 </div>
 
@@ -1061,7 +1040,7 @@ export function SimulasiPage() {
                     className="w-full rounded-lg border border-zinc-200 bg-white px-2 py-1 text-xs font-bold text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-white"
                   />
                   <span className="text-[10px] text-zinc-400">
-                    {rp(Math.round(inputPrice * (1 + inputTp2Pct / 100)))}
+                    {inputPrice === "" ? "—" : rp(Math.round(entryPrice * (1 + inputTp2Pct / 100)))}
                   </span>
                 </div>
 
@@ -1077,7 +1056,7 @@ export function SimulasiPage() {
                     className="w-full rounded-lg border border-zinc-200 bg-white px-2 py-1 text-xs font-bold text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-white"
                   />
                   <span className="text-[10px] text-zinc-400">
-                    {rp(Math.round(inputPrice * (1 + inputSlPct / 100)))}
+                    {inputPrice === "" ? "—" : rp(Math.round(entryPrice * (1 + inputSlPct / 100)))}
                   </span>
                 </div>
               </div>
@@ -1177,17 +1156,6 @@ export function SimulasiPage() {
               </div>
 
               <div className="pt-3 border-t border-zinc-100 dark:border-zinc-800 space-y-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    restoreDefaultSeedTrades();
-                    setShowSettingsModal(false);
-                  }}
-                  className="w-full rounded-xl border border-teal-300 bg-teal-50/70 px-4 py-2 text-xs font-bold text-teal-800 hover:bg-teal-100 dark:border-teal-800 dark:bg-teal-950/40 dark:text-teal-300"
-                >
-                  Muat Contoh Data Terverifikasi (Seed)
-                </button>
-
                 <button
                   type="button"
                   onClick={() => {

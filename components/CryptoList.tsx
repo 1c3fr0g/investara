@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { CryptoCategory, CryptoFearGreed, CryptoItem } from "@/lib/types";
 import { Card } from "./ui";
 import { CoinIcon } from "./CoinIcon";
@@ -48,8 +48,13 @@ export function CryptoList() {
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [page, setPage] = useState(1);
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const request = useRef<AbortController | null>(null);
 
   const fetchData = async (force = false, isBackground = false) => {
+    if (isBackground && request.current) return;
+    request.current?.abort();
+    const controller = new AbortController();
+    request.current = controller;
     if (!isBackground) setLoading(true);
     try {
       const q = new URLSearchParams({
@@ -61,20 +66,29 @@ export function CryptoList() {
         ...(category !== "Semua" ? { category } : {}),
         ...(force ? { refresh: "1" } : {}),
       });
-      const res = await fetch(`/api/crypto?${q}`);
+      const res = await fetch(`/api/crypto?${q}`, { signal: controller.signal });
       if (!res.ok) throw new Error("Gagal mengambil data");
       const json: CryptoApiResponse = await res.json();
+      if (request.current !== controller) return;
       setData(json);
       setFailed(false);
     } catch {
-      setFailed(true);
+      if (request.current === controller) setFailed(true);
     } finally {
-      if (!isBackground) setLoading(false);
+      if (request.current === controller) {
+        request.current = null;
+        setLoading(false);
+      }
     }
   };
 
   useEffect(() => {
-    fetchData();
+    const timer = window.setTimeout(() => void fetchData(), 0);
+    return () => {
+      window.clearTimeout(timer);
+      request.current?.abort();
+      request.current = null;
+    };
   }, [category, search, sortKey, sortDir, page]);
 
   useEffect(() => {
@@ -258,6 +272,9 @@ export function CryptoList() {
           >
             <span>⚖️</span>
             <span>Bandingkan</span>
+          </Link>
+          <Link href="/crypto/portofolio" className="control-button crystal-primary rounded-xl text-xs font-bold">
+            Portofolio Kripto
           </Link>
 
           {/* Auto Refresh & Manual Button */}

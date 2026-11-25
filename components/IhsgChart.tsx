@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import type { Ihsg } from "@/lib/types";
 import { num } from "@/lib/format";
+import { IhsgSectorMovements } from "./IhsgSectorMovements";
 
 function Sparkline({ data, up }: { data: number[]; up: boolean }) {
   if (!data || data.length < 2) return null;
@@ -289,6 +290,9 @@ export function IhsgChart() {
             </div>
           </div>
         </div>
+        <Suspense fallback={<p className="mt-4 text-xs text-slate-600 dark:text-slate-300">Memuat pergerakan sektor…</p>}>
+          <IhsgSectorMovements />
+        </Suspense>
       </div>
     </section>
   );

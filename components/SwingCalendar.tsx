@@ -17,7 +17,7 @@ interface SwingCalendarProps {
   summary: PaperTradingSummary;
   dailyMap: Record<string, DailyPerformance>;
   batchList: BatchPerformance[];
-  onCloseBatch?: (mode: "live" | "tp1" | "tp2") => void;
+  onCloseBatch?: () => void;
 }
 
 const MONTH_NAMES_ID = [
@@ -490,29 +490,13 @@ export function SwingCalendar({
               </div>
 
               {activeDailyData.openCount > 0 && onCloseBatch && (
-                <div className="flex items-center gap-1.5">
-                  <button
-                    onClick={() => onCloseBatch("tp1")}
-                    className="rounded-lg bg-teal-600 px-2.5 py-1 text-xs font-bold text-white hover:bg-teal-700 shadow-2xs transition active:scale-95"
-                    title="Kunci TP1 untuk posisi aktif"
-                  >
-                    🎯 Close TP 1
-                  </button>
-                  <button
-                    onClick={() => onCloseBatch("tp2")}
-                    className="rounded-lg bg-emerald-600 px-2.5 py-1 text-xs font-bold text-white hover:bg-emerald-700 shadow-2xs transition active:scale-95"
-                    title="Kunci TP2 untuk posisi aktif"
-                  >
-                    🚀 Close TP 2
-                  </button>
-                  <button
-                    onClick={() => onCloseBatch("live")}
-                    className="rounded-lg border border-rose-300 bg-rose-50 px-2.5 py-1 text-xs font-bold text-rose-800 hover:bg-rose-100 dark:border-rose-800 dark:bg-rose-950 dark:text-rose-300 transition active:scale-95"
-                    title="Tutup semua posisi aktif di harga live"
-                  >
-                    🔴 Close All
-                  </button>
-                </div>
+                <button
+                  onClick={onCloseBatch}
+                  className="rounded-lg border border-rose-300 bg-rose-50 px-2.5 py-1 text-xs font-bold text-rose-800 hover:bg-rose-100 dark:border-rose-800 dark:bg-rose-950 dark:text-rose-300 transition active:scale-95"
+                  title="Tutup semua posisi pada harga terakhir yang tercatat"
+                >
+                  Tutup Semua Manual
+                </button>
               )}
             </div>
           </div>

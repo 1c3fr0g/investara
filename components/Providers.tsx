@@ -2,7 +2,8 @@
 
 import { SessionProvider } from "next-auth/react";
 import type { ReactNode } from "react";
+import { OfflinePaperTrading } from "./OfflinePaperTrading";
 
 export function Providers({ children }: { children: ReactNode }) {
-  return <SessionProvider>{children}</SessionProvider>;
+  return <SessionProvider><OfflinePaperTrading>{children}</OfflinePaperTrading></SessionProvider>;
 }

@@ -128,16 +128,16 @@ export function newsArticleUrl(value: string): string | null {
   }
 }
 
-async function loadNewsFeed(query: string, edition: "id" | "en"): Promise<SourcedNews[]> {
+async function loadNewsFeed(query: string, edition: "id" | "en", limit: number): Promise<SourcedNews[]> {
   const locale = edition === "id" ? "ID" : "US";
   const rss = new URL("https://news.google.com/rss/search");
   rss.search = new URLSearchParams({ q: query, hl: edition, gl: locale, ceid: locale + ":" + edition }).toString();
-  const response = await fetch(rss, { signal: AbortSignal.timeout(3_500) });
-  if (!response.ok) return [];
+  const response = await fetch(rss, { cache: "no-store", signal: AbortSignal.timeout(3_500) });
+  if (!response.ok) throw new Error(`RSS merespons HTTP ${response.status}.`);
 
   const xml = await response.text();
+  if (!/<rss\b/i.test(xml)) throw new Error("Respons sumber berita bukan RSS.");
   const entries: SourcedNews[] = [];
-  const seenTitles = new Set<string>();
   for (const [, entry] of xml.matchAll(/<item\b[^>]*>([\s\S]*?)<\/item>/gi)) {
     const publisher = rssText(entry.match(/<source\b[^>]*>([\s\S]*?)<\/source>/i)?.[1] ?? "");
     const rawTitle = rssText(entry.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? "");
@@ -146,9 +146,7 @@ async function loadNewsFeed(query: string, edition: "id" | "en"): Promise<Source
     const rawLink = rssText(entry.match(/<link\b[^>]*>([\s\S]*?)<\/link>/i)?.[1] ?? "");
     const link = newsArticleUrl(rawLink);
     const publishedAt = Date.parse(entry.match(/<pubDate\b[^>]*>([\s\S]*?)<\/pubDate>/i)?.[1] ?? "");
-    const titleKey = title.toLowerCase();
-    if (!publisher || !title || !link || !Number.isFinite(publishedAt) || seenTitles.has(titleKey)) continue;
-    seenTitles.add(titleKey);
+    if (!publisher || !title || !link || !Number.isFinite(publishedAt)) continue;
     entries.push({
       id: link,
       judul: title,
@@ -159,17 +157,23 @@ async function loadNewsFeed(query: string, edition: "id" | "en"): Promise<Source
       ...classifyNewsSentiment(title),
     });
   }
-  return entries.sort((a, b) => b.publishedAt - a.publishedAt).slice(0, 8);
+  const unique = new Map<string, SourcedNews>();
+  for (const item of entries.sort((a, b) => b.publishedAt - a.publishedAt)) {
+    const key = item.judul.toLowerCase();
+    if (!unique.has(key)) unique.set(key, item);
+    if (unique.size === limit) break;
+  }
+  return [...unique.values()];
 }
 
-export async function fetchNewsFeed(query: string, edition: "id" | "en" = "id"): Promise<SourcedNews[]> {
-  const key = edition + ":" + query;
+export async function readNewsFeed(query: string, edition: "id" | "en" = "id", force = false, limit = 8): Promise<SourcedNews[]> {
+  const key = `${edition}:${limit}:${query}`;
   const cached = feedCache.get(key);
-  if (cached && Date.now() - cached.timestamp < NEWS_CACHE_TTL) return cached.items;
+  if (!force && cached && Date.now() - cached.timestamp < NEWS_CACHE_TTL) return cached.items;
   const pending = pendingFeeds.get(key);
   if (pending) return pending;
 
-  const request = loadNewsFeed(query, edition)
+  const request = loadNewsFeed(query, edition, limit)
     .then((items) => {
       if (items.length) {
         feedCache.delete(key);
@@ -181,10 +185,13 @@ export async function fetchNewsFeed(query: string, edition: "id" | "en" = "id"):
       }
       return items;
     })
-    .catch(() => [])
     .finally(() => pendingFeeds.delete(key));
   pendingFeeds.set(key, request);
   return request;
+}
+
+export function fetchNewsFeed(query: string, edition: "id" | "en" = "id"): Promise<SourcedNews[]> {
+  return readNewsFeed(query, edition).catch(() => []);
 }
 
 export function fetchStockNewsFeed(kode: string, nama: string) {

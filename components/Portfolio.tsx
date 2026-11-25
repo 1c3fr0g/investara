@@ -1,14 +1,17 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type Ref } from "react";
 import { useSession } from "next-auth/react";
-import type { Detail, ListResponse } from "@/lib/types";
-import { compact, num, pct, rp } from "@/lib/format";
+import type { CryptoItem, Detail, ListResponse } from "@/lib/types";
+import { compact, num, pct, rp, signedPct } from "@/lib/format";
+import { averageOpenBuyPrices, cryptoQuantityUnits, validPortfolioSymbol, type PortfolioMarket } from "@/lib/portfolio";
+import { convertCryptoPrice, USD_TO_IDR, type CryptoPriceCurrency } from "@/lib/cryptoCurrency";
 import { Card } from "./ui";
 import { LoginButtons } from "./AuthButtons";
 import { LineChart } from "./Charts";
 import { StockLogo } from "./StockLogo";
+import { CoinIcon } from "./CoinIcon";
 
 type Holding = { id: string; kode: string; harga_beli: number; lot: number; transactionId?: string };
 
@@ -27,12 +30,26 @@ type Transaction = {
 
 const LEGACY_KEY = "ihsg-portofolio-v1";
 const LOT = 100;
+const WIB_DATE = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Jakarta" });
+const cryptoPrice = (price: number | null | undefined) => price == null ? "-" : Math.abs(price) >= 1_000 ? rp(price)
+  : `Rp ${price.toLocaleString("id-ID", { maximumFractionDigits: 8 })}`;
+const cryptoValue = (value: number | null) => value !== null && Math.abs(value) < 1_000 ? cryptoPrice(value) : compact(value);
+const coinQuantity = new Intl.NumberFormat("id-ID", { maximumFractionDigits: 8 });
+const usdtPrice = (value: number) => `${coinQuantity.format(value)} USDT`;
+const usdtFromIdr = (value: number) => usdtPrice(convertCryptoPrice(value, "IDR", "USDT"));
+const input = "w-full rounded-xl border border-zinc-200 bg-white px-3 py-2.5 text-sm transition dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100";
 
 const tone = (v: number | null) => (v === null ? "" : v >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400");
 const sign = (v: number) => (v >= 0 ? "+" : "-");
 
+type PositionQuote = Pick<Detail, "nama" | "harga" | "sektor" | "website" | "dps_12m" | "target_rata" | "quoteStale"> & {
+  perubahan_pct?: number | null;
+  change24h?: number | null;
+  stale?: boolean;
+};
+
 type Row = Holding & {
-  d?: Detail;
+  d?: PositionQuote;
   modal: number;
   nilai: number | null;
   pl: number | null;
@@ -76,55 +93,67 @@ function downloadCSV(filename: string, headers: string[], rows: (string | number
   document.body.removeChild(link);
 }
 
-export function Portfolio() {
+export function Portfolio({ market = "stock" }: { market?: PortfolioMarket }) {
   const { status, data } = useSession();
+  const crypto = market === "crypto";
   if (status === "loading")
     return <main className="screen-shell screen-section text-sm text-zinc-600 dark:text-zinc-400">Memuat portofolio...</main>;
   if (!data?.user)
     return (
       <main className="screen-shell space-y-6 screen-section">
-        <h1 className="crystal-title">Portofolio</h1>
+        <h1 className="crystal-title">{crypto ? "Portofolio Kripto" : "Portofolio"}</h1>
         <Card>
           <h2 className="text-lg font-semibold text-zinc-950 dark:text-zinc-100">Masuk untuk Menyimpan Portofolio</h2>
           <p className="mb-4 mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-            Portofolio, alokasi sektor, dan riwayat transaksi beli/jual Anda tersimpan aman di database.
+            {crypto ? "Simpan kepemilikan dan riwayat transaksi kripto ke akun Anda." : "Portofolio, alokasi sektor, dan riwayat transaksi beli/jual Anda tersimpan aman di database."}
           </p>
-          <LoginButtons />
+          <LoginButtons callbackUrl={crypto ? "/crypto/portofolio" : "/portofolio"} />
         </Card>
       </main>
     );
-  return <PortfolioView />;
+  return <PortfolioView key={market + ":" + data.user.id} market={market} />;
 }
 
-function PortfolioView() {
+function PortfolioView({ market }: { market: PortfolioMarket }) {
+  const cryptoMarket = market === "crypto";
+  const holdingsApi = cryptoMarket ? "/api/crypto/portofolio" : "/api/portofolio";
+  const transactionsApi = cryptoMarket ? holdingsApi : "/api/portofolio/transaksi";
   const [items, setItems] = useState<Holding[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [ready, setReady] = useState(false);
+  const [loadError, setLoadError] = useState("");
   const [legacy, setLegacy] = useState<Omit<Holding, "id">[]>([]);
   const pendingTrade = useRef<{ key: string; id: string } | null>(null);
 
-  const fetchHoldings = () => {
-    fetch("/api/portofolio")
-      .then((r) => (r.ok ? r.json() : { items: [] }))
-      .then((j: { items: Holding[] }) => setItems(j.items))
-      .catch(() => {});
-  };
-
-  const fetchTransactions = () => {
-    fetch("/api/portofolio/transaksi")
-      .then((r) => (r.ok ? r.json() : { items: [] }))
-      .then((j: { items: Transaction[] }) => setTransactions(j.items))
-      .catch(() => {});
-  };
+  async function loadPortfolio(signal?: AbortSignal) {
+    try {
+      const read = async (path: string) => {
+        const response = await fetch(path, { cache: "no-store", signal });
+        if (!response.ok) throw new Error("Gagal memuat portofolio.");
+        return response.json();
+      };
+      const [holdings, journal] = await Promise.all([read(holdingsApi), cryptoMarket ? null : read(transactionsApi)]);
+      if (signal?.aborted) return;
+      setItems(holdings.items);
+      setTransactions(cryptoMarket ? holdings.transactions : journal.items);
+      setLoadError("");
+    } catch {
+      if (!signal?.aborted) setLoadError("Gagal memuat portofolio.");
+    } finally {
+      if (!signal?.aborted) setReady(true);
+    }
+  }
 
   useEffect(() => {
-    Promise.all([fetchHoldings(), fetchTransactions()]).finally(() => {
+    const controller = new AbortController();
+    void loadPortfolio(controller.signal);
+    if (!cryptoMarket) {
       try {
         const old = JSON.parse(localStorage.getItem(LEGACY_KEY) ?? "[]");
         if (Array.isArray(old)) setLegacy(old);
       } catch {}
-      setReady(true);
-    });
+    }
+    return () => controller.abort();
   }, []);
 
   async function tambahItem(h: Omit<Holding, "id">) {
@@ -134,7 +163,7 @@ function PortfolioView() {
       harga: h.harga_beli,
       lot: h.lot,
       fee: 0,
-      tanggal: new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Jakarta" }),
+      tanggal: WIB_DATE.format(new Date()),
       catatan: "Penambahan posisi portofolio",
     });
   }
@@ -142,25 +171,27 @@ function PortfolioView() {
   async function hapusItem(id: string) {
     const r = await fetch(`/api/portofolio?id=${encodeURIComponent(id)}`, { method: "DELETE" });
     if (!r.ok) throw new Error((await r.json()).error ?? "Gagal menghapus posisi");
-    await fetchHoldings();
+    await loadPortfolio();
   }
 
-  async function ubahItem(id: string, harga_beli: number, lot: number) {
-    const r = await fetch("/api/portofolio", {
+  async function ubahItem(holding: Holding, harga_beli: number, lot: number) {
+    const r = await fetch(holdingsApi, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id, harga_beli, lot }),
+      body: JSON.stringify({ id: holding.id, harga_beli, lot, expected: { harga_beli: holding.harga_beli, lot: holding.lot } }),
     });
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.error ?? "Gagal mengubah posisi");
-    await fetchHoldings();
+    const j = await r.json().catch(() => null);
+    if (r.status === 409) await loadPortfolio();
+    if (!r.ok || !j) throw new Error(j?.error ?? "Gagal mengubah posisi.");
+    setItems(j.items);
+    setTransactions(j.transactions);
   }
 
   async function tambahTransaksi(tx: Omit<Transaction, "id" | "created_at">) {
     const key = JSON.stringify(tx);
     if (pendingTrade.current?.key !== key) pendingTrade.current = { key, id: crypto.randomUUID() };
     const requestId = pendingTrade.current.id;
-    const r = await fetch("/api/portofolio/transaksi", {
+    const r = await fetch(transactionsApi, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...tx, syncHolding: true, requestId }),
@@ -174,7 +205,7 @@ function PortfolioView() {
   }
 
   async function hapusTransaksi(id: string) {
-    const r = await fetch(`/api/portofolio/transaksi?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+    const r = await fetch(`${transactionsApi}?id=${encodeURIComponent(id)}`, { method: "DELETE" });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error ?? "Gagal menghapus transaksi");
     setTransactions((previous) => previous.filter((transaction) => transaction.id !== id));
@@ -189,14 +220,26 @@ function PortfolioView() {
     });
     const j = await r.json();
     if (r.ok) {
-      await fetchHoldings();
+      await loadPortfolio();
       localStorage.removeItem(LEGACY_KEY);
       setLegacy([]);
     }
   }
 
+  if (loadError) return (
+    <main className="screen-shell screen-section space-y-4">
+      <h1 className="crystal-title">{cryptoMarket ? "Portofolio Kripto" : "Portofolio Saham"}</h1>
+      <Card>
+        <p role="alert" className="text-sm text-rose-700 dark:text-rose-300">{loadError}</p>
+        <button type="button" onClick={() => void loadPortfolio()} className="control-button crystal-primary mt-3 rounded-xl text-xs font-bold">Coba lagi</button>
+      </Card>
+    </main>
+  );
+  if (!ready) return <main className="screen-shell screen-section text-sm"><p role="status">Memuat portofolio…</p></main>;
+
   return (
     <PortfolioBody
+      market={market}
       items={items}
       transactions={transactions}
       ready={ready}
@@ -216,6 +259,7 @@ function PortfolioView() {
 }
 
 function PortfolioBody({
+  market,
   items,
   transactions,
   ready,
@@ -228,64 +272,117 @@ function PortfolioBody({
   onImport,
   onDismissLegacy,
 }: {
+  market: PortfolioMarket;
   items: Holding[];
   transactions: Transaction[];
   ready: boolean;
   onAdd: (h: Omit<Holding, "id">) => Promise<void>;
   onRemove: (id: string) => Promise<void>;
-  onEdit: (id: string, harga_beli: number, lot: number) => Promise<void>;
+  onEdit: (holding: Holding, harga_beli: number, lot: number) => Promise<void>;
   onAddTx: (tx: Omit<Transaction, "id" | "created_at">) => Promise<void>;
   onRemoveTx: (id: string) => Promise<void>;
   legacyCount: number;
   onImport: () => void;
   onDismissLegacy: () => void;
 }) {
+  const cryptoMarket = market === "crypto";
+  const assetLabel = cryptoMarket ? "Kripto" : "Saham";
+  const quantityLabel = cryptoMarket ? "Jumlah Koin" : "Jumlah Lot";
+  const multiplier = cryptoMarket ? 1 : LOT;
+  const formatPrice = cryptoMarket ? cryptoPrice : rp;
+  const formatValue = cryptoMarket ? cryptoValue : compact;
+  const formatQuantity = (quantity: number) => cryptoMarket ? coinQuantity.format(quantity) : quantity;
+  const validQuantity = (quantity: number) => cryptoMarket ? cryptoQuantityUnits(quantity) !== null : quantity > 0;
+  const quantityError = cryptoMarket ? "Masukkan jumlah koin yang positif dengan maksimal 8 angka desimal." : "Jumlah lot harus lebih dari 0.";
   const [tab, setTab] = useState<"ringkasan" | "saham" | "transaksi">("ringkasan");
-  const [details, setDetails] = useState<Record<string, Detail | null>>({});
+  const [details, setDetails] = useState<Record<string, PositionQuote | null>>({});
   const [ihsg, setIhsg] = useState<{ harga: number | null; perubahan_pct: number | null } | null>(null);
 
   // Form states
   const [kode, setKode] = useState("");
   const [picked, setPicked] = useState<string | null>(null);
   const [saran, setSaran] = useState<{ kode: string; nama: string }[]>([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [highlightedSuggestion, setHighlightedSuggestion] = useState(-1);
+  const stockInputId = useId();
+  const suggestionsId = `${stockInputId}-saran`;
+  const suggestionsVisible = showSuggestions && saran.length > 0;
   const [harga, setHarga] = useState("");
+  const [buyCurrency, setBuyCurrency] = useState<CryptoPriceCurrency>("IDR");
   const [lot, setLot] = useState("");
   const [err, setErr] = useState("");
+  const [savingTrade, setSavingTrade] = useState(false);
   const [positionError, setPositionError] = useState("");
+  const [positionNotice, setPositionNotice] = useState("");
 
   // Edit holding states
   const [editing, setEditing] = useState<Holding | null>(null);
   const [editHarga, setEditHarga] = useState("");
+  const [editCurrency, setEditCurrency] = useState<CryptoPriceCurrency>("IDR");
   const [editLot, setEditLot] = useState("");
   const [editErr, setEditErr] = useState("");
+  const [savingEdit, setSavingEdit] = useState(false);
+  const editDialog = useRef<HTMLDialogElement>(null);
+  const editPriceInput = useRef<HTMLInputElement>(null);
+  const editTrigger = useRef<HTMLButtonElement | null>(null);
 
-  function openEdit(h: Holding) {
+  useEffect(() => {
+    if (editing && editDialog.current && !editDialog.current.open) {
+      editDialog.current.showModal();
+      editPriceInput.current?.focus();
+    }
+  }, [editing]);
+
+  function openEdit(h: Holding, trigger: HTMLButtonElement) {
+    editTrigger.current = trigger;
     setEditing(h);
+    setEditCurrency("IDR");
     setEditHarga(String(h.harga_beli));
     setEditLot(String(h.lot));
     setEditErr("");
+    setPositionNotice("");
+  }
+
+  function closeEdit() {
+    editDialog.current?.close();
+    setEditing(null);
+    editTrigger.current?.focus({ preventScroll: true });
+    editTrigger.current = null;
   }
 
   async function simpanEdit(e: React.FormEvent) {
     e.preventDefault();
-    if (!editing) return;
-    const h = Number(editHarga.replace(/[^\d.]/g, ""));
-    const l = Number(editLot.replace(/[^\d.]/g, ""));
-    if (!(h > 0)) return setEditErr("Harga beli harus lebih dari 0.");
-    if (!(l > 0)) return setEditErr("Jumlah lot harus lebih dari 0.");
+    if (!editing || savingEdit) return;
+    const h = convertCryptoPrice(Number(editHarga), editCurrency, "IDR");
+    const l = Number(editLot);
+    if (!(h > 0 && h <= (cryptoMarket ? 1e12 : 1e9))) return setEditErr("Harga beli di luar batas pencatatan.");
+    if (!validQuantity(l) || l > 1e9) return setEditErr(quantityError);
     setEditErr("");
+    setSavingEdit(true);
     try {
-      await onEdit(editing.id, h, l);
-      setEditing(null);
+      await onEdit(editing, h, l);
+      setPositionNotice(`Posisi ${editing.kode} diperbarui.`);
+      closeEdit();
     } catch (err2) {
       setEditErr(err2 instanceof Error ? err2.message : "Gagal mengubah");
+    } finally {
+      setSavingEdit(false);
     }
+  }
+
+  function selectStock(suggestion: string) {
+    setPicked(suggestion);
+    setKode(suggestion);
+    setSaran([]);
+    setShowSuggestions(false);
+    setHighlightedSuggestion(-1);
   }
 
   // Transaction form states
   const [txTipe, setTxTipe] = useState<"BELI" | "JUAL">("BELI");
   const [txKode, setTxKode] = useState("");
   const [txHarga, setTxHarga] = useState("");
+  const [txCurrency, setTxCurrency] = useState<CryptoPriceCurrency>("IDR");
   const [txLot, setTxLot] = useState("");
   const [txTanggal, setTxTanggal] = useState("");
 
@@ -296,20 +393,23 @@ function PortfolioBody({
   const [txCatatan, setTxCatatan] = useState("");
   const [txErr, setTxErr] = useState("");
 
-  const [growth, setGrowth] = useState("8");
+  const [growth, setGrowth] = useState(cryptoMarket ? "0" : "8");
   const [divGrowth, setDivGrowth] = useState("5");
 
   const kodes = useMemo(() => [...new Set(items.map((i) => i.kode))], [items]);
+  const cryptoSymbols = [...new Set(["BTC", ...kodes])].sort().join(",");
 
   useEffect(() => {
+    if (cryptoMarket) return;
     // Fetch IHSG benchmark
     fetch("/api/ihsg")
       .then((r) => (r.ok ? r.json() : null))
       .then((j) => j && setIhsg({ harga: j.harga, perubahan_pct: j.perubahan_pct }))
       .catch(() => {});
-  }, []);
+  }, [cryptoMarket]);
 
   useEffect(() => {
+    if (cryptoMarket) return;
     for (const k of kodes) {
       if (k in details) continue;
       fetch(`/api/saham/${k}`)
@@ -317,55 +417,105 @@ function PortfolioBody({
         .then((d: Detail | null) => setDetails((p) => ({ ...p, [k]: d })))
         .catch(() => setDetails((p) => ({ ...p, [k]: null })));
     }
-  }, [kodes, details]);
+  }, [kodes, details, cryptoMarket]);
+
+  useEffect(() => {
+    if (!cryptoMarket) return;
+    const controller = new AbortController();
+    const symbols = cryptoSymbols.split(",");
+    let refreshing = false;
+    async function loadQuotes() {
+      if (refreshing) return;
+      refreshing = true;
+      const next: Record<string, PositionQuote | null> = {};
+      const batches: string[][] = [];
+      for (let i = 0; i < symbols.length; i += 100) batches.push(symbols.slice(i, i + 100));
+      await Promise.all(batches.map(async (batch) => {
+        try {
+          const params = new URLSearchParams({ symbols: batch.join(","), size: "100" });
+          const response = await fetch(`/api/crypto?${params}`, { signal: controller.signal });
+          if (!response.ok) return;
+          const { items }: { items: CryptoItem[] } = await response.json();
+          for (const coin of items) {
+            next[coin.symbol] = { nama: coin.name, harga: coin.price_idr, sektor: coin.category, website: null,
+              dps_12m: null, target_rata: null, change24h: coin.change_24h, stale: coin.stale };
+          }
+        } catch { /* Mark existing prices as stale below when a request fails. */ }
+      }));
+      if (!controller.signal.aborted) {
+        setDetails((previous) => Object.fromEntries(symbols.map((symbol) => {
+          const old = previous[symbol];
+          return [symbol, next[symbol] ?? (old ? { ...old, stale: true } : null)];
+        })));
+      }
+      refreshing = false;
+    }
+    void loadQuotes();
+    const interval = window.setInterval(() => { if (!document.hidden) void loadQuotes(); }, 30_000);
+    return () => {
+      controller.abort();
+      window.clearInterval(interval);
+    };
+  }, [cryptoMarket, cryptoSymbols]);
 
   useEffect(() => {
     const q = kode.trim();
     if (!q || picked === q.toUpperCase()) return;
     const ctrl = new AbortController();
     const t = setTimeout(() => {
-      fetch(`/api/saham?q=${encodeURIComponent(q)}&page=1&sort=mcap&dir=desc`, { signal: ctrl.signal })
+      fetch(`/api/${cryptoMarket ? "crypto" : "saham"}?q=${encodeURIComponent(q)}&page=1&sort=mcap&dir=desc`, { signal: ctrl.signal })
         .then((r) => (r.ok ? r.json() : null))
-        .then((j: ListResponse | null) => j && setSaran(j.items.slice(0, 6).map((i) => ({ kode: i.kode, nama: i.nama }))))
+        .then((j: ListResponse | { items: CryptoItem[] } | null) => {
+          if (j && !ctrl.signal.aborted) setSaran(j.items.slice(0, 6).map((i) =>
+            "symbol" in i ? { kode: i.symbol, nama: i.name } : { kode: i.kode, nama: i.nama }));
+        })
         .catch(() => {});
     }, 250);
     return () => {
       clearTimeout(t);
       ctrl.abort();
     };
-  }, [kode, picked]);
+  }, [kode, picked, cryptoMarket]);
 
   async function tambah(e: React.FormEvent) {
     e.preventDefault();
+    if (savingTrade || !ready) return;
     const k = (picked ?? kode).trim().toUpperCase();
-    const h = Number(harga.replace(/[^\d.]/g, ""));
-    const l = Number(lot.replace(/[^\d.]/g, ""));
-    if (!/^[A-Z0-9]{4}$/.test(k)) return setErr("Pilih kode saham yang valid (4 karakter).");
-    if (!(h > 0)) return setErr("Harga rata-rata beli harus lebih dari 0.");
-    if (!(l > 0)) return setErr("Jumlah lot harus lebih dari 0.");
+    const h = cryptoMarket ? convertCryptoPrice(Number(harga), buyCurrency, "IDR") : Number(harga.replace(/[^\d.]/g, ""));
+    const l = Number(cryptoMarket ? lot : lot.replace(/[^\d.]/g, ""));
+    if (!validPortfolioSymbol(k, market)) return setErr(cryptoMarket ? "Pilih kode koin yang valid." : "Pilih kode saham yang valid (4 karakter).");
+    if (!(h > 0) || (cryptoMarket && h > 1e12)) return setErr(cryptoMarket ? "Harga beli di luar batas pencatatan." : "Harga rata-rata beli harus lebih dari 0.");
+    if (!validQuantity(l)) return setErr(quantityError);
     setErr("");
+    setSavingTrade(true);
     try {
       await onAdd({ kode: k, harga_beli: h, lot: l });
     } catch (e2) {
       return setErr(e2 instanceof Error ? e2.message : "Gagal menyimpan");
+    } finally {
+      setSavingTrade(false);
     }
     setKode("");
     setPicked(null);
     setSaran([]);
+    setShowSuggestions(false);
+    setHighlightedSuggestion(-1);
     setHarga("");
     setLot("");
   }
 
   async function submitTx(e: React.FormEvent) {
     e.preventDefault();
+    if (savingTrade || !ready) return;
     const k = txKode.trim().toUpperCase();
-    const h = Number(txHarga.replace(/[^\d.]/g, ""));
-    const l = Number(txLot.replace(/[^\d.]/g, ""));
-    const fee = Number(txFee.replace(/[^\d.]/g, "")) || 0;
-    if (!/^[A-Z0-9]{4}$/.test(k)) return setTxErr("Pilih kode saham yang valid (4 karakter).");
-    if (!(h > 0)) return setTxErr("Harga transaksi harus lebih dari 0.");
-    if (!(l > 0)) return setTxErr("Jumlah lot harus lebih dari 0.");
+    const h = cryptoMarket ? convertCryptoPrice(Number(txHarga), txCurrency, "IDR") : Number(txHarga.replace(/[^\d.]/g, ""));
+    const l = Number(cryptoMarket ? txLot : txLot.replace(/[^\d.]/g, ""));
+    const fee = Number(cryptoMarket ? txFee : txFee.replace(/[^\d.]/g, "")) || 0;
+    if (!validPortfolioSymbol(k, market)) return setTxErr(cryptoMarket ? "Pilih kode koin yang valid." : "Pilih kode saham yang valid (4 karakter).");
+    if (!(h > 0) || (cryptoMarket && h > 1e12)) return setTxErr(cryptoMarket ? "Harga transaksi di luar batas pencatatan." : "Harga transaksi harus lebih dari 0.");
+    if (!validQuantity(l)) return setTxErr(quantityError);
     setTxErr("");
+    setSavingTrade(true);
     try {
       await onAddTx({
         kode: k,
@@ -379,17 +529,28 @@ function PortfolioBody({
       setTxKode("");
       setTxHarga("");
       setTxLot("");
+      setTxFee("0");
       setTxCatatan("");
     } catch (e2) {
       setTxErr(e2 instanceof Error ? e2.message : "Gagal menyimpan");
+    } finally {
+      setSavingTrade(false);
     }
   }
 
+  const tradesById = new Map(transactions.map((trade) => [trade.id, trade]));
+  const editingBuy = cryptoMarket && editing?.transactionId ? tradesById.get(editing.transactionId) : undefined;
+  const editedQuantity = Number(editLot) || 0;
+  const editedTotalQuantity = editingBuy && editing ? editingBuy.lot - editing.lot + editedQuantity : 0;
+  const editedFee = editingBuy && editedTotalQuantity > 0 ? editingBuy.fee * editedQuantity / editedTotalQuantity : 0;
+  const editedCost = convertCryptoPrice(Number(editHarga) || 0, editCurrency, "IDR") * editedQuantity * multiplier + editedFee;
+  const averageBuyPrices = useMemo(() => cryptoMarket ? averageOpenBuyPrices(items) : [], [cryptoMarket, items]);
   const rows: Row[] = items.map((h) => {
     const d = details[h.kode] ?? undefined;
-    const lembar = h.lot * LOT;
-    const modal = lembar * h.harga_beli;
-    const nilai = d?.harga != null ? lembar * d.harga : null;
+    const lembar = h.lot * multiplier;
+    const buy = cryptoMarket && h.transactionId ? tradesById.get(h.transactionId) : undefined;
+    const modal = lembar * h.harga_beli + (buy ? buy.fee * h.lot / buy.lot : 0);
+    const nilai = d?.harga != null && !d.stale && !d.quoteStale ? lembar * d.harga : null;
     const pl = nilai === null ? null : nilai - modal;
     const divTahun = d?.dps_12m != null ? lembar * d.dps_12m : null;
     const nilaiTarget = d?.target_rata != null ? lembar * d.target_rata : null;
@@ -408,20 +569,23 @@ function PortfolioBody({
   });
 
   const totalModal = rows.reduce((s, r) => s + r.modal, 0);
-  const totalNilai = rows.reduce((s, r) => s + (r.nilai ?? r.modal), 0);
+  const pricedRows = rows.filter((row) => row.nilai !== null).length;
+  const completeQuotes = rows.length > 0 && pricedRows === rows.length;
+  const totalNilai = rows.reduce((s, r) => s + (r.nilai ?? 0), 0);
   const totalPl = totalNilai - totalModal;
   const totalPlPct = totalModal > 0 ? (totalPl / totalModal) * 100 : 0;
   const totalDiv = rows.reduce((s, r) => s + (r.divTahun ?? 0), 0);
   const totalDivNet = totalDiv * 0.9; // Setelah PPh Final 10%
-  const g = Number(growth) || 0;
-  const gd = Number(divGrowth) || 0;
+  const g = cryptoMarket ? Math.max(-100, Math.min(1000, Number(growth) || 0)) : Number(growth) || 0;
+  const gd = cryptoMarket ? 0 : Number(divGrowth) || 0;
 
   // Sektor Allocation calculation
   const sectorAllocation = useMemo(() => {
     const map = new Map<string, number>();
     for (const r of rows) {
+      if (r.nilai === null) continue;
       const s = r.d?.sektor || "Lainnya";
-      const val = r.nilai ?? r.modal;
+      const val = r.nilai;
       map.set(s, (map.get(s) ?? 0) + val);
     }
     const total = [...map.values()].reduce((a, b) => a + b, 0);
@@ -436,11 +600,20 @@ function PortfolioBody({
   }, [rows]);
 
   // Alpha vs IHSG calculation
-  const ihsgPct = ihsg?.perubahan_pct ?? 0;
-  const alphaPct = totalPlPct - ihsgPct;
+  const ihsgPct = ihsg?.perubahan_pct ?? null;
+  const changes = rows.map((row) => cryptoMarket ? row.d?.change24h : row.d?.quoteStale ? null : row.d?.perubahan_pct);
+  const previousValue = completeQuotes && changes.every((change) => change != null && Number.isFinite(change) && change > -100)
+    ? rows.reduce((sum, row, index) => sum + row.nilai! / (1 + changes[index]! / 100), 0) : 0;
+  const basketChange = previousValue > 0 ? (totalNilai / previousValue - 1) * 100 : null;
+  const ihsgDifference = basketChange !== null && ihsgPct !== null ? basketChange - ihsgPct : null;
+  const btc = details.BTC;
+  const btc24h = btc && !btc.stale ? btc.change24h ?? null : null;
+  const portfolio24h = cryptoMarket ? basketChange : null;
+  const btcDifference = portfolio24h !== null && btc24h !== null ? portfolio24h - btc24h : null;
 
   // Proyeksi pertumbuhan
-  const proyeksi = [1, 3, 5, 10, 20].map((n) => {
+  const years = cryptoMarket ? Array.from({ length: 21 }, (_, year) => year) : [1, 3, 5, 10, 20];
+  const proyeksi = years.map((n) => {
     const nilai = totalNilai * Math.pow(1 + g / 100, n);
     let div = 0;
     for (let i = 0; i < n; i++) div += totalDivNet * Math.pow(1 + gd / 100, i);
@@ -449,6 +622,11 @@ function PortfolioBody({
 
   // Export CSV functions
   function exportHoldingsCSV() {
+    if (cryptoMarket) {
+      downloadCSV("portofolio_kripto.csv", ["Kode", "Nama Koin", "Kategori", "Jumlah Koin", "Harga Beli (Rp)", "Harga Kini (Rp)", "Total Modal (Rp)", "Nilai Pasar (Rp)", "Untung/Rugi (Rp)", "Untung/Rugi (%)"],
+        rows.map((r) => [r.kode, r.d?.nama ?? r.kode, r.d?.sektor, r.lot, r.harga_beli, r.d?.stale ? null : r.d?.harga, r.modal, r.nilai, r.pl, r.plPct]));
+      return;
+    }
     const headers = [
       "Kode",
       "Nama Saham",
@@ -487,7 +665,7 @@ function PortfolioBody({
   }
 
   function exportTransactionsCSV() {
-    const headers = ["Tanggal", "Tipe", "Kode", "Lot", "Harga", "Fee", "Total Nilai", "Catatan"];
+    const headers = ["Tanggal", "Tipe", "Kode", cryptoMarket ? "Jumlah Koin" : "Lot", "Harga", "Fee", "Total Nilai", "Catatan"];
     const dataRows = transactions.map((t) => [
       t.tanggal,
       t.tipe,
@@ -495,34 +673,31 @@ function PortfolioBody({
       t.lot,
       t.harga,
       t.fee,
-      t.harga * t.lot * LOT + (t.tipe === "BELI" ? t.fee : -t.fee),
+      t.harga * t.lot * multiplier + (t.tipe === "BELI" ? t.fee : -t.fee),
       t.catatan || "-",
     ]);
-    downloadCSV("riwayat_transaksi_ihsg.csv", headers, dataRows);
+    downloadCSV(cryptoMarket ? "riwayat_transaksi_kripto.csv" : "riwayat_transaksi_ihsg.csv", headers, dataRows);
   }
-
-  const input =
-    "w-full rounded-xl border border-zinc-200 bg-white px-3 py-2.5 text-sm outline-none transition focus:border-green-500 focus:ring-2 focus:ring-green-200 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100";
 
   return (
     <main className="screen-shell space-y-8 screen-section">
       {/* Page Header */}
       <div className="crystal-intro flex flex-wrap items-end justify-between gap-4">
         <div className="space-y-1">
-          <div className="flex items-center gap-2.5">
-            <h1 className="crystal-title">Portofolio Saham</h1>
+          <div className="flex flex-wrap items-center gap-2.5">
+            <h1 className="crystal-title">Portofolio {assetLabel}</h1>
             <span className="rounded-full bg-emerald-100 px-3 py-0.5 text-xs font-semibold text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300">
               Sinkronisasi Cloud
             </span>
           </div>
           <p className="text-sm text-zinc-600 dark:text-zinc-400">
-            Kelola alokasi sektor, bandingkan kinerja dengan IHSG, pantau dividen &amp; riwayat transaksi beli/jual.
+            {cryptoMarket ? "Pantau nilai koin, bandingkan pergerakan dengan BTC, dan catat transaksi beli atau jual." : "Kelola alokasi sektor, bandingkan kinerja dengan IHSG, pantau dividen & riwayat transaksi beli/jual."}
           </p>
         </div>
 
         {/* Tab Switcher & Export */}
         <div className="flex flex-wrap items-center gap-2.5">
-          <div className="flex rounded-xl border border-zinc-200 bg-zinc-50 p-1 text-xs dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="flex flex-wrap rounded-xl border border-zinc-200 bg-zinc-50 p-1 text-xs dark:border-zinc-800 dark:bg-zinc-900">
             <button
               onClick={() => setTab("ringkasan")}
               className={`rounded-lg px-3.5 py-1.5 font-semibold transition ${
@@ -541,7 +716,7 @@ function PortfolioBody({
                   : "text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
               }`}
             >
-              Saham ({items.length})
+              {assetLabel} ({items.length})
             </button>
             <button
               onClick={() => setTab("transaksi")}
@@ -582,17 +757,23 @@ function PortfolioBody({
 
       {/* KPI Cards */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
-        <Summary label="Total Modal" value={compact(totalModal)} sub={`${rows.length} posisi saham`} />
+        <Summary label="Total Modal" value={formatValue(totalModal)} sub={`${rows.length} posisi ${assetLabel.toLowerCase()}`} />
         <Summary
           label="Nilai Pasar Sekarang"
-          value={compact(totalNilai)}
-          sub={totalPl >= 0 ? `+${compact(totalPl)} (${num(totalPlPct, 2)}%)` : `${compact(totalPl)} (${num(totalPlPct, 2)}%)`}
-          cls={tone(totalPl)}
+          value={formatValue(completeQuotes ? totalNilai : null)}
+          sub={!completeQuotes ? rows.length ? `${pricedRows} dari ${rows.length} posisi memiliki harga` : "Tambahkan kepemilikan" :
+            `${totalPl >= 0 ? "+" : ""}${formatValue(totalPl)} (${num(totalPlPct, 2)}%)`}
+          cls={tone(completeQuotes ? totalPl : null) || undefined}
         />
+        {cryptoMarket ? <>
+          <Summary label="Untung/Rugi Posisi" value={formatValue(completeQuotes ? totalPl : null)} sub={completeQuotes ? signedPct(totalPlPct) : ""} cls={tone(completeQuotes ? totalPl : null) || undefined} />
+          <Summary label="Portofolio 24 Jam" value={signedPct(portfolio24h)} cls={tone(portfolio24h) || undefined} />
+          <Summary label="Selisih vs BTC 24 Jam" value={btcDifference === null ? "-" : `${btcDifference >= 0 ? "+" : ""}${num(btcDifference)} poin %`} cls={tone(btcDifference) || undefined} />
+        </> : <>
         <Summary
-          label="Dividen Bersih (Net PPh 10%)"
+          label="Estimasi Dividen setelah Potongan"
           value={compact(totalDivNet)}
-          sub={`Rp ${compact(totalDivNet / 12)} / bulan`}
+          sub={`${compact(totalDivNet / 12)} / bulan dengan asumsi potongan 10%`}
           cls="text-emerald-600 dark:text-emerald-400"
         />
         <Summary
@@ -602,15 +783,47 @@ function PortfolioBody({
         />
         {/* IHSG Benchmark Comparison KPI Card */}
         <Card className="p-5 sm:p-6 border-emerald-200 bg-emerald-50/30 dark:border-zinc-800 dark:bg-zinc-900 shadow-xs">
-          <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">vs Benchmark IHSG</div>
-          <div className={`mt-2 text-2xl font-bold tabular-nums ${tone(alphaPct)}`}>
-            {alphaPct >= 0 ? `+${num(alphaPct, 2)}%` : `${num(alphaPct, 2)}%`}
-          </div>
-          <div className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-            {alphaPct >= 0 ? "🟢 Mengalahkan IHSG (Alpha +)" : "🔴 Di bawah IHSG"}
+          <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">Selisih Harian vs IHSG</div>
+          <div className={`mt-2 text-2xl font-bold tabular-nums ${tone(ihsgDifference)}`}>
+            {ihsgDifference === null ? "-" : `${ihsgDifference >= 0 ? "+" : ""}${num(ihsgDifference)} poin %`}
           </div>
         </Card>
+        </>}
       </div>
+
+      {averageBuyPrices.length > 0 && tab !== "transaksi" && (
+        <Card className="p-0">
+          <div className="border-b border-zinc-200/75 px-4 py-3 dark:border-white/10 sm:px-5">
+            <h2 id="crypto-average-buy" className="font-bold">Rata-rata Harga Beli</h2>
+            <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
+              Rata-rata tertimbang dari pembelian yang masih dimiliki, di luar biaya transaksi. Estimasi USDT memakai kurs tetap {rp(USD_TO_IDR)} per USDT.
+            </p>
+          </div>
+          <div role="region" aria-labelledby="crypto-average-buy" tabIndex={0} className="table-scroll">
+            <table className="w-full text-sm">
+              <thead className="text-xs text-zinc-600 dark:text-zinc-300">
+                <tr>
+                  <th scope="col" className="px-4 py-2 text-left">Koin</th>
+                  <th scope="col" className="px-4 py-2 text-right">Jumlah Tersisa</th>
+                  <th scope="col" className="px-4 py-2 text-right">Rata-rata per Koin</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-200/75 dark:divide-white/10">
+                {averageBuyPrices.map(({ symbol, quantity, priceIdr }) => (
+                  <tr key={symbol}>
+                    <th scope="row" className="px-4 py-2.5 text-left font-bold">{symbol}</th>
+                    <td className="px-4 py-2.5 text-right tabular-nums">{formatQuantity(quantity)}</td>
+                    <td className="px-4 py-2.5 text-right tabular-nums">
+                      <span className="whitespace-nowrap font-semibold">{cryptoPrice(priceIdr)}</span>
+                      <span className="block whitespace-nowrap text-xs text-zinc-600 dark:text-zinc-400">≈ {usdtFromIdr(priceIdr)}</span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
 
       {/* TAB 1: Ringkasan & Alokasi */}
       {tab === "ringkasan" && (
@@ -619,13 +832,15 @@ function PortfolioBody({
           <div className="grid gap-6 lg:grid-cols-2">
             {/* Sector Pie/Donut Chart */}
             <Card>
-              <h2 className="text-lg font-bold text-zinc-950 dark:text-zinc-100">Alokasi per Sektor</h2>
+              <h2 className="text-lg font-bold text-zinc-950 dark:text-zinc-100">Alokasi per {cryptoMarket ? "Kategori" : "Sektor"}</h2>
               <p className="mb-4 text-xs text-zinc-500 dark:text-zinc-400">
-                Diversifikasi portofolio untuk mengendalikan konsentrasi risiko sektoral.
+                {cryptoMarket ? "Bobot kategori berdasarkan nilai pasar koin yang memiliki harga terkini." : "Diversifikasi portofolio untuk mengendalikan konsentrasi risiko sektoral."}
               </p>
 
               {sectorAllocation.length === 0 ? (
-                <div className="py-12 text-center text-sm text-zinc-400">Belum ada saham dalam portofolio</div>
+                <div className="py-12 text-center text-sm text-zinc-500 dark:text-zinc-400">
+                  {cryptoMarket && rows.length ? "Harga pasar belum tersedia untuk menghitung alokasi." : `Belum ada ${assetLabel.toLowerCase()} dalam portofolio.`}
+                </div>
               ) : (
                 <div className="flex flex-col items-center gap-6 sm:flex-row sm:items-start">
                   {/* SVG Donut */}
@@ -634,6 +849,7 @@ function PortfolioBody({
                       {(() => {
                         let cumulativePct = 0;
                         return sectorAllocation.map((s) => {
+                          if (s.pct >= 100) return <circle key={s.nama} cx="50" cy="50" r="40" fill={s.color} />;
                           const startAngle = (cumulativePct / 100) * 360;
                           cumulativePct += s.pct;
                           const endAngle = (cumulativePct / 100) * 360;
@@ -654,7 +870,7 @@ function PortfolioBody({
                     </svg>
                     <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
                       <span className="text-[11px] text-zinc-400">Total</span>
-                      <span className="text-xs font-bold text-zinc-900 dark:text-zinc-100">{compact(totalNilai)}</span>
+                      <span className="text-xs font-bold text-zinc-900 dark:text-zinc-100">{formatValue(completeQuotes ? totalNilai : null)}</span>
                     </div>
                   </div>
 
@@ -668,7 +884,7 @@ function PortfolioBody({
                         </div>
                         <div className="text-right tabular-nums">
                           <span className="font-bold text-zinc-900 dark:text-zinc-100">{num(s.pct, 1)}%</span>
-                          <span className="ml-2 text-zinc-400">({compact(s.nilai)})</span>
+                          <span className="ml-2 text-zinc-400">({formatValue(s.nilai)})</span>
                         </div>
                       </div>
                     ))}
@@ -678,60 +894,38 @@ function PortfolioBody({
             </Card>
 
             {/* Benchmark vs IHSG Card */}
-            <Card className="flex flex-col justify-between">
+            {cryptoMarket ? (
+              <Card>
+                <h2 className="text-lg font-bold text-zinc-950 dark:text-zinc-100">Perbandingan Kinerja vs BTC</h2>
+                <p className="mb-4 text-xs text-zinc-500 dark:text-zinc-400">Estimasi perubahan 24 jam berdasarkan jumlah koin yang dimiliki saat ini.</p>
+                <dl className="space-y-2">
+                  <div className="ios-glass-subtle flex justify-between gap-3 rounded-xl p-4 text-sm">
+                    <dt>Portofolio 24 jam</dt><dd className={`font-bold tabular-nums ${tone(portfolio24h)}`}>{signedPct(portfolio24h)}</dd>
+                  </div>
+                  <div className="ios-glass-subtle flex justify-between gap-3 rounded-xl p-4 text-sm">
+                    <dt>Bitcoin 24 jam</dt><dd className={`font-bold tabular-nums ${tone(btc24h)}`}>{signedPct(btc24h)}</dd>
+                  </div>
+                </dl>
+              </Card>
+            ) : <Card className="flex flex-col justify-between">
               <div>
-                <h2 className="text-lg font-bold text-zinc-950 dark:text-zinc-100">Perbandingan Kinerja vs IHSG</h2>
+                <h2 className="text-lg font-bold text-zinc-950 dark:text-zinc-100">Pergerakan Harian vs IHSG</h2>
                 <p className="mb-4 text-xs text-zinc-500 dark:text-zinc-400">
-                  Mengukur kemampuan portofolio menghasilkan Alpha di atas indeks pasar IHSG (^JKSE).
+                  Estimasi pergerakan harian dari jumlah saham yang dimiliki saat ini.
                 </p>
 
-                <div className="space-y-4">
-                  <div className="rounded-xl border border-zinc-200 p-4 dark:border-zinc-800">
-                    <div className="flex justify-between text-sm">
-                      <span className="font-semibold text-zinc-800 dark:text-zinc-200">Return Portofolio Anda</span>
-                      <span className={`font-bold tabular-nums ${tone(totalPlPct)}`}>
-                        {totalPlPct >= 0 ? "+" : ""}{num(totalPlPct, 2)}%
-                      </span>
-                    </div>
-                    <div className="mt-2 h-2.5 w-full rounded-full bg-zinc-100 dark:bg-zinc-800">
-                      <div
-                        style={{ width: `${Math.min(100, Math.max(5, (totalPlPct + 50)))}%` }}
-                        className={`h-full rounded-full ${totalPlPct >= 0 ? "bg-emerald-500" : "bg-rose-500"}`}
-                      />
-                    </div>
+                <dl className="space-y-2">
+                  <div className="ios-glass-subtle flex justify-between gap-3 rounded-xl p-4 text-sm">
+                    <dt>Portofolio hari ini</dt>
+                    <dd className={`font-bold tabular-nums ${tone(basketChange)}`}>{signedPct(basketChange)}</dd>
                   </div>
-
-                  <div className="rounded-xl border border-zinc-200 p-4 dark:border-zinc-800">
-                    <div className="flex justify-between text-sm">
-                      <span className="font-semibold text-zinc-800 dark:text-zinc-200">Pergerakan Indeks IHSG</span>
-                      <span className={`font-bold tabular-nums ${tone(ihsgPct)}`}>
-                        {ihsgPct >= 0 ? "+" : ""}{num(ihsgPct, 2)}%
-                      </span>
-                    </div>
-                    <div className="mt-2 h-2.5 w-full rounded-full bg-zinc-100 dark:bg-zinc-800">
-                      <div
-                        style={{ width: `${Math.min(100, Math.max(5, (ihsgPct + 50)))}%` }}
-                        className={`h-full rounded-full ${ihsgPct >= 0 ? "bg-emerald-500" : "bg-rose-500"}`}
-                      />
-                    </div>
+                  <div className="ios-glass-subtle flex justify-between gap-3 rounded-xl p-4 text-sm">
+                    <dt>IHSG hari ini</dt>
+                    <dd className={`font-bold tabular-nums ${tone(ihsgPct)}`}>{signedPct(ihsgPct)}</dd>
                   </div>
-                </div>
+                </dl>
               </div>
-
-              <div className="mt-4 rounded-xl bg-zinc-50 p-3 text-xs text-zinc-600 dark:bg-zinc-800/60 dark:text-zinc-300">
-                {alphaPct >= 0 ? (
-                  <span>
-                    🏆 Portofolio Anda mencatat <strong>Alpha +{num(alphaPct, 2)}%</strong> di atas pasar, membuktikan
-                    strategi pemilihan saham berkinerja unggul!
-                  </span>
-                ) : (
-                  <span>
-                    ℹ️ Portofolio saat ini tertinggal <strong>{num(Math.abs(alphaPct), 2)}%</strong> dari IHSG. Evaluasi
-                    kembali bobot saham berkinerja rendah.
-                  </span>
-                )}
-              </div>
-            </Card>
+            </Card>}
           </div>
 
           {/* Historical Simulation Chart */}
@@ -739,10 +933,10 @@ function PortfolioBody({
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-lg font-bold text-zinc-950 dark:text-zinc-100">
-                  Grafik Nilai Portofolio dari Waktu ke Waktu
+                  Proyeksi Nilai Portofolio
                 </h2>
                 <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                  Proyeksi akumulasi modal dan apresiasi nilai investasi portofolio Anda.
+                  {cryptoMarket ? "Simulasi pertumbuhan majemuk dari nilai pasar saat ini." : "Proyeksi akumulasi modal dan apresiasi nilai investasi portofolio Anda."}
                 </p>
               </div>
               <div className="flex items-center gap-4 text-xs">
@@ -755,14 +949,18 @@ function PortfolioBody({
               </div>
             </div>
 
-            <LineChart
+            {cryptoMarket && completeQuotes && <label className="mb-4 block w-full max-w-xs text-xs font-semibold">
+              Asumsi perubahan per tahun (%)
+              <input type="number" min={-100} max={1000} value={growth} onChange={(e) => setGrowth(e.target.value)} className={`${input} mt-1`} />
+            </label>}
+            {completeQuotes ? <LineChart
               series={[
                 { values: proyeksi.map((p) => totalModal), stroke: "stroke-zinc-400 dark:stroke-zinc-600", dashed: true },
                 { values: proyeksi.map((p) => p.total), stroke: "stroke-emerald-600", fill: "fill-emerald-500/10" },
               ]}
-              xLabels={["Sekarang", "20 Tahun"]}
-              formatY={compact}
-            />
+              xLabels={[cryptoMarket ? "Sekarang" : "1 Tahun", "20 Tahun"]}
+              formatY={formatValue}
+            /> : <p className="py-8 text-center text-sm text-zinc-500 dark:text-zinc-400">Proyeksi muncul setelah harga terkini tersedia untuk semua posisi.</p>}
           </Card>
         </div>
       )}
@@ -772,41 +970,79 @@ function PortfolioBody({
         <div className="space-y-6">
           {/* Add Stock Form */}
           <Card>
-            <h2 className="mb-3 text-lg font-bold text-zinc-950 dark:text-zinc-100">Tambah Saham ke Portofolio</h2>
-            <form onSubmit={tambah} className="grid gap-3 sm:grid-cols-2 md:grid-cols-[1.4fr_1fr_1fr_auto] md:items-end">
-              <label className="relative block text-sm font-medium text-zinc-800 dark:text-zinc-200">
-                Kode Saham
+            <h2 className="mb-3 text-lg font-bold text-zinc-950 dark:text-zinc-100">Tambah {assetLabel} ke Portofolio</h2>
+            <form onSubmit={tambah} className="grid items-start gap-3 sm:grid-cols-2 lg:grid-cols-[1.4fr_1fr_1fr_auto]">
+              <div className="min-w-0 text-sm font-medium text-zinc-800 dark:text-zinc-200">
+                <label htmlFor={stockInputId}>{cryptoMarket ? "Kode Koin" : "Kode Saham"}</label>
                 <input
+                  id={stockInputId}
                   className={`${input} mt-1`}
+                  role="combobox"
+                  aria-autocomplete="list"
+                  aria-expanded={suggestionsVisible}
+                  aria-controls={suggestionsVisible ? suggestionsId : undefined}
+                  aria-activedescendant={suggestionsVisible && highlightedSuggestion >= 0 ? `${suggestionsId}-${highlightedSuggestion}` : undefined}
+                  autoComplete="off"
+                  autoCapitalize="characters"
                   value={kode}
+                  onFocus={() => setShowSuggestions(true)}
+                  onBlur={() => {
+                    setShowSuggestions(false);
+                    setHighlightedSuggestion(-1);
+                  }}
                   onChange={(e) => {
                     setKode(e.target.value.toUpperCase());
                     setPicked(null);
+                    setSaran([]);
+                    setHighlightedSuggestion(-1);
+                    setShowSuggestions(true);
                   }}
-                  placeholder="Contoh: BBCA"
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape" && showSuggestions) {
+                      e.preventDefault();
+                      setShowSuggestions(false);
+                      setHighlightedSuggestion(-1);
+                    } else if (saran.length > 0 && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+                      e.preventDefault();
+                      const step = e.key === "ArrowDown" ? 1 : -1;
+                      const next = highlightedSuggestion < 0 ? (step === 1 ? 0 : saran.length - 1)
+                        : (highlightedSuggestion + step + saran.length) % saran.length;
+                      setShowSuggestions(true);
+                      setHighlightedSuggestion(next);
+                      document.getElementById(`${suggestionsId}-${next}`)?.scrollIntoView({ block: "nearest" });
+                    } else if (e.key === "Enter" && suggestionsVisible && saran[highlightedSuggestion]) {
+                      e.preventDefault();
+                      selectStock(saran[highlightedSuggestion].kode);
+                    }
+                  }}
+                  placeholder={cryptoMarket ? "Contoh: BTC" : "Contoh: BBCA"}
                 />
-                {saran.length > 0 && (
-                  <div className="absolute left-0 right-0 top-full z-20 mt-1 max-h-48 overflow-y-auto rounded-xl border border-zinc-200 bg-white shadow-lg dark:border-zinc-800 dark:bg-zinc-900">
-                    {saran.map((s) => (
+                {suggestionsVisible && (
+                  <div id={suggestionsId} role="listbox" aria-label="Saran kode saham" className="ios-glass-subtle mt-2 max-h-48 overflow-y-auto rounded-xl p-1">
+                    {saran.map((s, index) => (
                       <button
                         key={s.kode}
+                        id={`${suggestionsId}-${index}`}
                         type="button"
-                        onClick={() => {
-                          setPicked(s.kode);
-                          setKode(s.kode);
-                          setSaran([]);
-                        }}
-                        className="flex w-full items-baseline justify-between px-3 py-2 text-left text-xs hover:bg-zinc-50 dark:hover:bg-zinc-800"
+                        role="option"
+                        aria-selected={highlightedSuggestion === index}
+                        tabIndex={-1}
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={() => selectStock(s.kode)}
+                        className="flex min-h-11 w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs hover:bg-white/75 aria-selected:bg-white dark:hover:bg-white/10 dark:aria-selected:bg-white/15"
                       >
-                        <strong className="text-green-700 dark:text-green-400">{s.kode}</strong>
-                        <span className="truncate text-zinc-400 max-w-[140px]">{s.nama}</span>
+                        <strong className="shrink-0 text-green-700 dark:text-green-400">{s.kode}</strong>
+                        <span title={s.nama} className="min-w-0 truncate text-zinc-600 dark:text-zinc-300">{s.nama}</span>
                       </button>
                     ))}
                   </div>
                 )}
-              </label>
+              </div>
 
-              <label className="block text-sm font-medium text-zinc-800 dark:text-zinc-200">
+              {cryptoMarket ? (
+                <CryptoUnitPriceInput label="Harga Beli per Koin" value={harga} currency={buyCurrency}
+                  onChange={setHarga} onCurrencyChange={setBuyCurrency} disabled={savingTrade} />
+              ) : <label className="block text-sm font-medium text-zinc-800 dark:text-zinc-200">
                 Harga Rata-Rata Beli (Rp)
                 <input
                   className={`${input} mt-1`}
@@ -814,32 +1050,36 @@ function PortfolioBody({
                   onChange={(e) => setHarga(e.target.value)}
                   placeholder="Contoh: 9000"
                 />
-              </label>
+              </label>}
 
               <label className="block text-sm font-medium text-zinc-800 dark:text-zinc-200">
-                Jumlah Lot
+                {quantityLabel}
                 <input
+                  type={cryptoMarket ? "number" : "text"}
+                  step={cryptoMarket ? "any" : undefined}
+                  inputMode={cryptoMarket ? "decimal" : undefined}
                   className={`${input} mt-1`}
                   value={lot}
                   onChange={(e) => setLot(e.target.value)}
-                  placeholder="Contoh: 10"
+                  placeholder={cryptoMarket ? "Contoh: 0.05" : "Contoh: 10"}
                 />
               </label>
 
               <button
                 type="submit"
-                className="h-10 rounded-xl bg-green-600 px-5 text-sm font-bold text-white shadow-sm hover:bg-green-700"
+                disabled={savingTrade || !ready}
+                className="h-10 rounded-xl bg-green-600 px-5 text-sm font-bold text-white shadow-sm hover:bg-green-700 disabled:opacity-60 sm:mt-6"
               >
-                + Tambah
+                {savingTrade ? "Menyimpan…" : "+ Tambah"}
               </button>
             </form>
-            {err && <p className="mt-2 text-xs font-semibold text-rose-600">{err}</p>}
+            {err && <p role="alert" className="mt-2 text-xs font-semibold text-rose-600">{err}</p>}
           </Card>
 
           {/* Holdings Table */}
           <Card className="overflow-hidden p-0">
-            <div className="flex items-center justify-between border-b border-zinc-100 px-5 py-4 dark:border-zinc-800">
-              <h2 className="font-bold text-zinc-950 dark:text-zinc-100">Daftar Kepemilikan Saham</h2>
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-100 px-5 py-4 dark:border-zinc-800">
+              <h2 className="font-bold text-zinc-950 dark:text-zinc-100">Daftar Kepemilikan {assetLabel}</h2>
               <button
                 onClick={exportHoldingsCSV}
                 className="text-xs font-semibold text-green-700 hover:underline dark:text-green-400"
@@ -849,21 +1089,23 @@ function PortfolioBody({
             </div>
 
             {rows.length === 0 ? (
-              <div className="p-8 text-center text-sm text-zinc-400">Belum ada saham yang ditambahkan.</div>
+              <div className="p-8 text-center text-sm text-zinc-500 dark:text-zinc-400">{!ready ? "Memuat kepemilikan…" : `Belum ada ${assetLabel.toLowerCase()} yang ditambahkan.`}</div>
             ) : (
               <div className="table-scroll">
                 <table className="w-full text-sm">
                   <thead className="border-b border-zinc-200/80 bg-zinc-50/80 text-xs font-bold uppercase tracking-wider text-zinc-500 dark:border-zinc-800 dark:bg-zinc-800/60 dark:text-zinc-400">
                     <tr>
                       <th className="px-4 py-3.5 text-left">Kode</th>
-                      <th className="px-4 py-3.5 text-right">Lot</th>
+                      <th className="px-4 py-3.5 text-right">{cryptoMarket ? "Jumlah Koin" : "Lot"}</th>
                       <th className="px-4 py-3.5 text-right">Harga Beli</th>
                       <th className="px-4 py-3.5 text-right">Harga Kini</th>
                       <th className="px-4 py-3.5 text-right">Total Modal</th>
                       <th className="px-4 py-3.5 text-right">Nilai Pasar</th>
                       <th className="px-4 py-3.5 text-right">Untung/Rugi</th>
-                      <th className="px-4 py-3.5 text-right">Dividen Net/Thn</th>
-                      <th className="px-4 py-3.5 text-right">Yield on Cost</th>
+                      {!cryptoMarket && <>
+                        <th className="px-4 py-3.5 text-right">Dividen Net/Thn</th>
+                        <th className="px-4 py-3.5 text-right">Yield on Cost</th>
+                      </>}
                       <th className="px-4 py-3.5 text-center">Aksi</th>
                     </tr>
                   </thead>
@@ -872,43 +1114,55 @@ function PortfolioBody({
                       <tr key={r.id} className="transition-colors hover:bg-zinc-50/70 dark:hover:bg-zinc-800/40">
                         <td className="px-4 py-3.5">
                           <div className="flex items-center gap-3">
-                            <StockLogo kode={r.kode} size="sm" website={r.d?.website} />
-                            <div>
-                              <Link href={`/saham/${r.kode}`} className="font-bold text-green-700 hover:underline dark:text-green-400 text-sm">
+                            {cryptoMarket ? <CoinIcon symbol={r.kode} name={r.d?.nama ?? r.kode} size={24} className="size-6 shrink-0" /> :
+                              <StockLogo kode={r.kode} size="sm" website={r.d?.website} />}
+                            <div className="min-w-0">
+                              <Link href={cryptoMarket ? `/crypto/${r.kode.toLowerCase()}` : `/saham/${r.kode}`} className="font-bold text-green-700 hover:underline dark:text-green-400 text-sm">
                                 {r.kode}
                               </Link>
                               <div className="text-xs text-zinc-400 truncate max-w-[130px]">{r.d?.nama || r.kode}</div>
+                              <button
+                                type="button"
+                                onClick={(event) => openEdit(r, event.currentTarget)}
+                                className="ios-glass-subtle mt-1 inline-flex min-h-11 items-center rounded-lg px-2.5 text-xs font-semibold text-zinc-700 hover:bg-white sm:min-h-8 dark:text-zinc-200 dark:hover:bg-white/15"
+                                aria-label={`Edit posisi ${r.kode}`}
+                              >
+                                Edit
+                              </button>
                             </div>
                           </div>
                         </td>
-                        <td className="px-4 py-3.5 text-right tabular-nums font-medium text-zinc-800 dark:text-zinc-200">{r.lot}</td>
-                        <td className="px-4 py-3.5 text-right tabular-nums text-zinc-800 dark:text-zinc-200">{rp(r.harga_beli)}</td>
-                        <td className="px-4 py-3.5 text-right tabular-nums font-semibold text-zinc-900 dark:text-zinc-100">{rp(r.d?.harga)}</td>
-                        <td className="px-4 py-3.5 text-right tabular-nums text-zinc-600 dark:text-zinc-400">{compact(r.modal)}</td>
-                        <td className="px-4 py-3.5 text-right tabular-nums font-bold text-zinc-900 dark:text-zinc-100">{compact(r.nilai)}</td>
+                        <td className="px-4 py-3.5 text-right tabular-nums font-medium text-zinc-800 dark:text-zinc-200">{formatQuantity(r.lot)}</td>
+                        <td className="px-4 py-3.5 text-right tabular-nums text-zinc-800 dark:text-zinc-200">
+                          {formatPrice(r.harga_beli)}
+                          {cryptoMarket && <span className="block whitespace-nowrap text-xs text-zinc-600 dark:text-zinc-400">≈ {usdtFromIdr(r.harga_beli)}</span>}
+                        </td>
+                        <td className="px-4 py-3.5 text-right tabular-nums font-semibold text-zinc-900 dark:text-zinc-100">
+                          {formatPrice(r.d?.harga)}
+                          {r.d?.stale && <span className="block text-xs font-normal text-amber-700 dark:text-amber-300">Harga tersimpan</span>}
+                        </td>
+                        <td className="px-4 py-3.5 text-right tabular-nums text-zinc-600 dark:text-zinc-400">{formatValue(r.modal)}</td>
+                        <td className="px-4 py-3.5 text-right tabular-nums font-bold text-zinc-900 dark:text-zinc-100">{formatValue(r.nilai)}</td>
                         <td className={`px-4 py-3.5 text-right tabular-nums font-bold ${tone(r.pl)}`}>
-                          {r.pl === null ? "-" : `${sign(r.pl)}${compact(Math.abs(r.pl))} (${num(r.plPct, 1)}%)`}
+                          {r.pl === null ? "-" : `${sign(r.pl)}${formatValue(Math.abs(r.pl))} (${num(r.plPct, 1)}%)`}
                         </td>
-                        <td className="px-4 py-3.5 text-right tabular-nums font-semibold text-emerald-600 dark:text-emerald-400">
-                          {r.divTahun ? compact(r.divTahun * 0.9) : "-"}
-                        </td>
-                        <td className="px-4 py-3.5 text-right tabular-nums text-zinc-700 dark:text-zinc-300">{pct(r.yoc)}</td>
+                        {!cryptoMarket && <>
+                          <td className="px-4 py-3.5 text-right tabular-nums font-semibold text-emerald-600 dark:text-emerald-400">
+                            {r.divTahun ? compact(r.divTahun * 0.9) : "-"}
+                          </td>
+                          <td className="px-4 py-3.5 text-right tabular-nums text-zinc-700 dark:text-zinc-300">{pct(r.yoc)}</td>
+                        </>}
                         <td className="px-4 py-3.5 text-center">
                           <div className="flex items-center justify-center gap-2">
-                            {!r.transactionId && <button
-                              onClick={() => openEdit(r)}
-                              className="rounded-lg bg-zinc-100 px-2 py-1 text-xs font-semibold text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700"
-                              title="Edit harga beli atau jumlah lot"
-                            >
-                              Edit
-                            </button>}
                             <button
                               onClick={() => {
                                 setTab("transaksi");
                                 setTxTipe("JUAL");
                                 setTxKode(r.kode);
-                                setTxHarga(r.d?.harga ? String(r.d.harga) : String(r.harga_beli));
+                                setTxCurrency("IDR");
+                                setTxHarga(r.d?.harga && !r.d.stale ? String(r.d.harga) : cryptoMarket ? "" : String(r.harga_beli));
                                 setTxLot(String(r.lot));
+                                setTxFee("0");
                               }}
                               className="rounded-lg bg-rose-50 px-2 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-100 dark:bg-rose-950/40 dark:text-rose-300"
                             >
@@ -936,86 +1190,111 @@ function PortfolioBody({
           </Card>
 
           {positionError && <p role="alert" className="text-sm font-semibold text-rose-700 dark:text-rose-300">{positionError}</p>}
+          {positionNotice && <p role="status" className="text-sm font-semibold text-green-700 dark:text-green-300">{positionNotice}</p>}
 
           {/* Modal Edit Posisi Saham */}
           {editing && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-md">
-              <div className="ios-glass-canvas viewport-dialog relative w-full max-w-md space-y-4 rounded-3xl p-4 shadow-2xl sm:p-6">
-                <div className="flex items-center justify-between border-b border-zinc-200/70 pb-3.5 dark:border-white/10">
-                  <div>
-                    <h3 className="text-base font-black text-[#191919] dark:text-white">
-                      Edit Posisi Saham {editing.kode}
-                    </h3>
-                    <p className="text-xs font-semibold text-zinc-500 dark:text-zinc-400">
-                      Perbarui harga rata-rata beli atau jumlah lot Anda.
-                    </p>
-                  </div>
-                  <button
-                    onClick={() => setEditing(null)}
-                    className="rounded-full h-8 w-8 flex items-center justify-center border border-zinc-200/90 bg-white text-zinc-700 hover:bg-zinc-100 hover:text-black dark:border-white/15 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700 shadow-xs font-bold text-xs shrink-0 transition"
-                  >
-                    ✕
-                  </button>
+            <dialog
+              ref={editDialog}
+              aria-labelledby="edit-position-title"
+              aria-describedby="edit-position-description"
+              onCancel={(event) => {
+                event.preventDefault();
+                if (!savingEdit) closeEdit();
+              }}
+              className="ios-glass-canvas viewport-dialog fixed inset-0 m-auto w-[calc(100%-2rem)] max-w-md space-y-4 rounded-3xl p-4 text-zinc-950 shadow-2xl backdrop:bg-black/50 backdrop:backdrop-blur-sm dark:text-zinc-100 sm:p-6"
+            >
+              <div className="flex items-center justify-between border-b border-zinc-200/70 pb-3.5 dark:border-white/10">
+                <div>
+                  <h3 id="edit-position-title" className="text-base font-black text-[#191919] dark:text-white">
+                    Edit Posisi {assetLabel} {editing.kode}
+                  </h3>
+                  <p id="edit-position-description" className="text-xs font-semibold text-zinc-600 dark:text-zinc-300">
+                    {editing.transactionId ? "Perubahan ini juga memperbarui transaksi beli terkait." : "Perbarui harga beli dan lot yang masih dimiliki."}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={closeEdit}
+                  disabled={savingEdit}
+                  aria-label="Tutup edit posisi"
+                  className="rounded-full h-8 w-8 flex items-center justify-center border border-zinc-200/90 bg-white text-zinc-700 hover:bg-zinc-100 hover:text-black dark:border-white/15 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700 shadow-xs font-bold text-xs shrink-0 transition"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <form onSubmit={simpanEdit} className="space-y-4">
+                {cryptoMarket ? (
+                  <CryptoUnitPriceInput label="Harga Beli per Koin" value={editHarga} currency={editCurrency}
+                    onChange={setEditHarga} onCurrencyChange={setEditCurrency} disabled={savingEdit} inputRef={editPriceInput} />
+                ) : <div>
+                  <label htmlFor="edit-position-price" className="block text-xs font-bold text-zinc-700 dark:text-zinc-300">
+                    Harga Rata-Rata Beli (Rp)
+                  </label>
+                  <input
+                    id="edit-position-price"
+                    ref={editPriceInput}
+                    type="number"
+                    step="any"
+                    inputMode="decimal"
+                    required
+                    readOnly={savingEdit}
+                    className={`${input} mt-1`}
+                    value={editHarga}
+                    onChange={(e) => setEditHarga(e.target.value)}
+                    placeholder="Contoh: 9000"
+                  />
+                </div>}
+
+                <div>
+                  <label htmlFor="edit-position-lot" className="block text-xs font-bold text-zinc-700 dark:text-zinc-300">
+                    {cryptoMarket ? "Jumlah Koin Tersisa" : "Lot Tersisa"}
+                  </label>
+                  <input
+                    id="edit-position-lot"
+                    type="number"
+                    step="any"
+                    inputMode="decimal"
+                    required
+                    readOnly={savingEdit}
+                    className={`${input} mt-1`}
+                    value={editLot}
+                    onChange={(e) => setEditLot(e.target.value)}
+                    placeholder={cryptoMarket ? "Contoh: 0.05" : "Contoh: 10"}
+                  />
                 </div>
 
-                <form onSubmit={simpanEdit} className="space-y-4">
-                  <div>
-                    <label className="block text-xs font-bold text-zinc-700 dark:text-zinc-300">
-                      Harga Rata-Rata Beli (Rp)
-                    </label>
-                    <input
-                      className={`${input} mt-1`}
-                      value={editHarga}
-                      onChange={(e) => setEditHarga(e.target.value)}
-                      placeholder="Contoh: 9000"
-                    />
-                  </div>
+                {editErr && (
+                  <p role="alert" className="text-xs font-bold text-rose-700 dark:text-rose-300">{editErr}</p>
+                )}
 
-                  <div>
-                    <label className="block text-xs font-bold text-zinc-700 dark:text-zinc-300">
-                      Jumlah Lot
-                    </label>
-                    <input
-                      className={`${input} mt-1`}
-                      value={editLot}
-                      onChange={(e) => setEditLot(e.target.value)}
-                      placeholder="Contoh: 10"
-                    />
-                  </div>
+                <div className="ios-glass-subtle rounded-2xl p-3 text-xs text-zinc-600 dark:text-zinc-300 border border-zinc-200/80 dark:border-white/10">
+                  Modal posisi tersisa{" "}
+                  <strong className="text-[#191919] dark:text-white font-black">
+                    {formatValue(editedCost)}
+                  </strong>
+                </div>
 
-                  {editErr && (
-                    <p className="text-xs font-bold text-rose-600">{editErr}</p>
-                  )}
-
-                  <div className="ios-glass-subtle rounded-2xl p-3 text-xs text-zinc-600 dark:text-zinc-300 border border-zinc-200/80 dark:border-white/10">
-                    Total Modal Baru:{" "}
-                    <strong className="text-[#191919] dark:text-white font-black">
-                      {rp(
-                        (Number(editHarga.replace(/[^\d.]/g, "")) || 0) *
-                          (Number(editLot.replace(/[^\d.]/g, "")) || 0) *
-                          LOT
-                      )}
-                    </strong>
-                  </div>
-
-                  <div className="flex items-center justify-end gap-2 pt-2 border-t border-zinc-200/70 dark:border-white/10">
-                    <button
-                      type="button"
-                      onClick={() => setEditing(null)}
-                      className="rounded-full border border-zinc-200/80 bg-white px-4 py-2 text-xs font-bold text-zinc-700 hover:bg-zinc-100 dark:border-white/10 dark:bg-zinc-800 dark:text-zinc-300 transition"
-                    >
-                      Batal
-                    </button>
-                    <button
-                      type="submit"
-                      className="rounded-full bg-[#191919] text-white hover:bg-black dark:bg-white dark:text-[#191919] px-5 py-2 text-xs font-black shadow-md hover:scale-[1.01] active:scale-95 transition"
-                    >
-                      Simpan Perubahan
-                    </button>
-                  </div>
-                </form>
-              </div>
-            </div>
+                <div className="flex flex-wrap items-center justify-end gap-2 border-t border-zinc-200/70 pt-2 dark:border-white/10">
+                  <button
+                    type="button"
+                    onClick={closeEdit}
+                    disabled={savingEdit}
+                    className="control-button min-h-11 rounded-full border border-zinc-200/80 bg-white text-xs font-bold text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-60 dark:border-white/10 dark:bg-zinc-800 dark:text-zinc-300"
+                  >
+                    Batal
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={savingEdit}
+                    className="control-button crystal-primary min-h-11 rounded-full text-xs font-bold transition disabled:opacity-60"
+                  >
+                    {savingEdit ? "Menyimpan…" : "Simpan Perubahan"}
+                  </button>
+                </div>
+              </form>
+            </dialog>
           )}
         </div>
       )}
@@ -1026,7 +1305,7 @@ function PortfolioBody({
           {/* Add Transaction Form */}
           <Card>
             <h2 className="mb-3 text-lg font-bold text-zinc-950 dark:text-zinc-100">Catat Transaksi Beli / Jual</h2>
-            <p className="mb-3 text-sm text-zinc-600 dark:text-zinc-400">Beli menambah posisi. Jual mengurangi lot tertua lebih dulu. Kelola posisi yang dibeli melalui riwayat transaksi.</p>
+            <p className="mb-3 text-sm text-zinc-600 dark:text-zinc-400">{cryptoMarket ? "Beli menambah posisi, dan jual mengurangi koin dari pembelian tertua lebih dulu. Catat harga dan biaya dalam rupiah." : "Beli menambah posisi. Jual mengurangi lot tertua lebih dulu. Kelola posisi yang dibeli melalui riwayat transaksi."}</p>
             <form onSubmit={submitTx} className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6 lg:items-end">
               <label className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
                 Tipe Transaksi
@@ -1043,12 +1322,12 @@ function PortfolioBody({
               </label>
 
               <label className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
-                Kode Saham
+                {cryptoMarket ? "Kode Koin" : "Kode Saham"}
                 <input
                   type="text"
-                  placeholder="BBCA"
+                  placeholder={cryptoMarket ? "BTC" : "BBCA"}
                   value={txKode}
-                  maxLength={4}
+                  maxLength={cryptoMarket ? 20 : 4}
                   onChange={(e) => setTxKode(e.target.value.toUpperCase())}
                   className={`${input} mt-1`}
                 />
@@ -1064,7 +1343,10 @@ function PortfolioBody({
                 />
               </label>
 
-              <label className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
+              {cryptoMarket ? (
+                <CryptoUnitPriceInput label="Harga per Koin" value={txHarga} currency={txCurrency}
+                  onChange={setTxHarga} onCurrencyChange={setTxCurrency} disabled={savingTrade} />
+              ) : <label className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
                 Harga / Lembar (Rp)
                 <input
                   type="text"
@@ -1073,24 +1355,31 @@ function PortfolioBody({
                   onChange={(e) => setTxHarga(e.target.value)}
                   className={`${input} mt-1`}
                 />
-              </label>
+              </label>}
 
               <label className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
-                Jumlah Lot
+                {quantityLabel}
                 <input
-                  type="text"
-                  placeholder="10"
+                  type={cryptoMarket ? "number" : "text"}
+                  step={cryptoMarket ? "any" : undefined}
+                  inputMode={cryptoMarket ? "decimal" : undefined}
+                  placeholder={cryptoMarket ? "0.05" : "10"}
                   value={txLot}
                   onChange={(e) => setTxLot(e.target.value)}
                   className={`${input} mt-1`}
                 />
               </label>
 
+              {cryptoMarket && <label className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
+                Biaya Transaksi (Rp)
+                <input type="number" min={0} step="any" inputMode="decimal" value={txFee} onChange={(e) => setTxFee(e.target.value)} className={`${input} mt-1`} />
+              </label>}
               <button
                 type="submit"
-                className="h-10 rounded-xl bg-green-600 px-4 text-sm font-bold text-white shadow-sm hover:bg-green-700"
+                disabled={savingTrade || !ready}
+                className="h-10 rounded-xl bg-green-600 px-4 text-sm font-bold text-white shadow-sm hover:bg-green-700 disabled:opacity-60"
               >
-                + Simpan Transaksi
+                {savingTrade ? "Menyimpan…" : "+ Simpan Transaksi"}
               </button>
 
               <label className="sm:col-span-2 lg:col-span-6 text-sm font-medium text-zinc-800 dark:text-zinc-200">
@@ -1109,8 +1398,8 @@ function PortfolioBody({
 
           {/* Transactions History Table */}
           <Card className="overflow-hidden p-0">
-            <div className="flex items-center justify-between border-b border-zinc-100 px-5 py-4 dark:border-zinc-800">
-              <h2 className="font-bold text-zinc-950 dark:text-zinc-100">Riwayat Pembelian & Penjualan Saham</h2>
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-100 px-5 py-4 dark:border-zinc-800">
+              <h2 className="font-bold text-zinc-950 dark:text-zinc-100">Riwayat Pembelian &amp; Penjualan {assetLabel}</h2>
               <button
                 onClick={exportTransactionsCSV}
                 className="text-xs font-semibold text-green-700 hover:underline dark:text-green-400"
@@ -1129,8 +1418,9 @@ function PortfolioBody({
                       <th className="px-4 py-3">Tanggal</th>
                       <th className="px-3 py-3">Tipe</th>
                       <th className="px-3 py-3">Kode</th>
-                      <th className="px-3 py-3 text-right">Lot</th>
+                      <th className="px-3 py-3 text-right">{cryptoMarket ? "Jumlah Koin" : "Lot"}</th>
                       <th className="px-3 py-3 text-right">Harga</th>
+                      {cryptoMarket && <th className="px-3 py-3 text-right">Biaya</th>}
                       <th className="px-3 py-3 text-right">Total Transaksi</th>
                       <th className="px-4 py-3">Catatan</th>
                       <th className="px-3 py-3 text-center">Aksi</th>
@@ -1138,7 +1428,7 @@ function PortfolioBody({
                   </thead>
                   <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
                     {transactions.map((t) => {
-                      const totalNominal = t.harga * t.lot * LOT;
+                      const totalNominal = t.harga * t.lot * multiplier + (cryptoMarket ? (t.tipe === "BELI" ? t.fee : -t.fee) : 0);
                       return (
                         <tr key={t.id} className="hover:bg-zinc-50/50 dark:hover:bg-zinc-800/30">
                           <td className="px-4 py-3 text-xs text-zinc-600 dark:text-zinc-400">{t.tanggal}</td>
@@ -1154,10 +1444,14 @@ function PortfolioBody({
                             </span>
                           </td>
                           <td className="px-3 py-3 font-bold text-green-700 dark:text-green-400">{t.kode}</td>
-                          <td className="px-3 py-3 text-right tabular-nums text-zinc-800 dark:text-zinc-200">{t.lot}</td>
-                          <td className="px-3 py-3 text-right tabular-nums text-zinc-800 dark:text-zinc-200">{rp(t.harga)}</td>
+                          <td className="px-3 py-3 text-right tabular-nums text-zinc-800 dark:text-zinc-200">{formatQuantity(t.lot)}</td>
+                          <td className="px-3 py-3 text-right tabular-nums text-zinc-800 dark:text-zinc-200">
+                            {formatPrice(t.harga)}
+                            {cryptoMarket && <span className="block whitespace-nowrap text-xs text-zinc-600 dark:text-zinc-400">≈ {usdtFromIdr(t.harga)}</span>}
+                          </td>
+                          {cryptoMarket && <td className="px-3 py-3 text-right tabular-nums">{cryptoPrice(t.fee)}</td>}
                           <td className="px-3 py-3 text-right tabular-nums font-bold text-zinc-900 dark:text-zinc-100">
-                            {compact(totalNominal)}
+                            {formatValue(totalNominal)}
                           </td>
                           <td className="px-4 py-3 text-xs text-zinc-500 dark:text-zinc-400">{t.catatan || "-"}{!t.linked && <span className="block text-[10px]">Arsip lama</span>}</td>
                           <td className="px-3 py-3 text-center">
@@ -1184,6 +1478,44 @@ function PortfolioBody({
         </div>
       )}
     </main>
+  );
+}
+
+function CryptoUnitPriceInput({ label, value, currency, onChange, onCurrencyChange, disabled, inputRef }: {
+  label: string;
+  value: string;
+  currency: CryptoPriceCurrency;
+  onChange: (value: string) => void;
+  onCurrencyChange: (currency: CryptoPriceCurrency) => void;
+  disabled?: boolean;
+  inputRef?: Ref<HTMLInputElement>;
+}) {
+  const id = useId();
+  const other = currency === "IDR" ? "USDT" : "IDR";
+  const equivalent = convertCryptoPrice(Number(value), currency, other);
+  return (
+    <div className="min-w-0 text-sm font-medium text-zinc-800 dark:text-zinc-200">
+      <label htmlFor={id}>{label}</label>
+      <div className="mt-1 grid grid-cols-[minmax(0,1fr)_auto] gap-2">
+        <input id={id} ref={inputRef} type="number" min={0} step="any" inputMode="decimal" required readOnly={disabled}
+          aria-describedby={`${id}-kurs`} className={`${input} min-w-0`} value={value}
+          onChange={(event) => onChange(event.target.value)} />
+        <select aria-label="Mata uang harga" value={currency} disabled={disabled} className={`${input} w-auto px-2`}
+          onChange={(event) => {
+            const next = event.target.value as CryptoPriceCurrency;
+            const converted = convertCryptoPrice(Number(value), currency, next);
+            if (value && Number.isFinite(converted)) onChange(String(Number(converted.toPrecision(15))));
+            onCurrencyChange(next);
+          }}>
+          <option value="IDR">IDR</option>
+          <option value="USDT">USDT</option>
+        </select>
+      </div>
+      <p id={`${id}-kurs`} className="mt-1 text-xs font-normal text-zinc-600 dark:text-zinc-400">
+        {equivalent > 0 && Number.isFinite(equivalent) && <span className="block font-semibold tabular-nums">≈ {other === "IDR" ? cryptoPrice(equivalent) : usdtPrice(equivalent)}</span>}
+        Kurs estimasi {rp(USD_TO_IDR)} per USDT.
+      </p>
+    </div>
   );
 }
 

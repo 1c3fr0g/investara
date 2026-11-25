@@ -29,11 +29,10 @@ function changeCls(pct: number | null): string {
 /* ── Sector aggregate stats ─────────────────────────────────────────── */
 function sectorStats(stocks: ListItem[]) {
   const totalMcap = stocks.reduce((s, x) => s + (x.mcap ?? 0), 0);
-  const gaining = stocks.filter((x) => (x.perubahan_pct ?? 0) > 0).length;
-  const losing  = stocks.filter((x) => (x.perubahan_pct ?? 0) < 0).length;
-  const avgPct  = stocks.length
-    ? stocks.reduce((s, x) => s + (x.perubahan_pct ?? 0), 0) / stocks.length
-    : 0;
+  const changes = stocks.flatMap(({ perubahan_pct }) => perubahan_pct === null ? [] : [perubahan_pct]);
+  const gaining = changes.filter((change) => change > 0).length;
+  const losing = changes.filter((change) => change < 0).length;
+  const avgPct = changes.length ? changes.reduce((sum, change) => sum + change, 0) / changes.length : null;
   return { totalMcap, gaining, losing, avgPct };
 }
 
@@ -58,12 +57,14 @@ function StockBubble({ s, maxMcap, hovered, onHover }: {
       href={`/saham/${s.kode}`}
       onMouseEnter={() => onHover(s)}
       onMouseLeave={() => onHover(null)}
+      onFocus={() => onHover(s)}
+      onBlur={() => onHover(null)}
       style={{
         width: `${size}px`,
         height: `${size}px`,
         backgroundColor: col.bg,
         color: col.text,
-        outline: hovered ? `3px solid ${col.ring}` : "none",
+        outline: hovered ? `3px solid ${col.ring}` : undefined,
         outlineOffset: "2px",
         transform: hovered ? "scale(1.14)" : "scale(1)",
         transition: "transform 0.15s ease, outline 0.1s ease",
@@ -95,7 +96,7 @@ function SectorCard({ sektor, stocks, hovered, onHover }: {
 }) {
   const { totalMcap, gaining, losing, avgPct } = sectorStats(stocks);
   const maxMcap = Math.max(...stocks.map((s) => s.mcap ?? 0));
-  const isUp = avgPct >= 0;
+  const isUp = (avgPct ?? 0) >= 0;
 
   return (
     <div className="ios-glass-canvas overflow-hidden rounded-2xl sm:rounded-3xl">
@@ -104,13 +105,13 @@ function SectorCard({ sektor, stocks, hovered, onHover }: {
         <div className="space-y-1">
           <h3 className="text-sm font-bold text-zinc-950 dark:text-zinc-100">{sektor}</h3>
           <div className="flex items-center gap-3 text-xs text-zinc-500 dark:text-zinc-400">
-            <span>Rp {compact(totalMcap)}</span>
+            <span>{compact(totalMcap)}</span>
             <span className="text-emerald-600 dark:text-emerald-400 font-semibold">▲ {gaining}</span>
             <span className="text-rose-500 dark:text-rose-400 font-semibold">▼ {losing}</span>
           </div>
         </div>
         <div className={`flex h-11 w-11 items-center justify-center rounded-full text-xs font-extrabold shadow-xs ${changeCls(avgPct)}`}>
-          {avgPct >= 0 ? "+" : ""}{num(avgPct, 1)}%
+          {avgPct === null ? "-" : `${isUp ? "+" : ""}${num(avgPct, 1)}%`}
         </div>
       </div>
 
@@ -149,20 +150,25 @@ const SEKTORS = [
 export function Heatmap() {
   const [items, setItems] = useState<ListItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+  const [retry, setRetry] = useState(0);
   const [selectedSektor, setSelectedSektor] = useState("Semua Sektor");
   const [limit, setLimit] = useState<number>(100);
   const [hovered, setHovered] = useState<ListItem | null>(null);
   const [showAll, setShowAll] = useState(true);
 
   useEffect(() => {
-    fetch("/api/saham?sort=mcap&dir=desc&page=1&size=500")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((j: { items?: ListItem[] } | null) => {
-        if (j?.items) setItems(j.items);
+    const controller = new AbortController();
+    fetch("/api/saham?sort=mcap&dir=desc&size=1000", { signal: controller.signal })
+      .then(async (r) => {
+        if (!r.ok) throw new Error("Gagal memuat peta panas.");
+        return r.json();
       })
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }, []);
+      .then(({ items }: { items: ListItem[] }) => { if (!controller.signal.aborted) setItems(items); })
+      .catch(() => { if (!controller.signal.aborted) setError(true); })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [retry]);
 
   const filtered = useMemo(() => {
     let list = items.filter((i) => i.mcap && i.mcap > 0 && i.harga);
@@ -181,8 +187,8 @@ export function Heatmap() {
       map.get(s)!.push(item);
     }
     return [...map.entries()].sort((a, b) => {
-      const avgA = a[1].reduce((acc, x) => acc + (x.perubahan_pct ?? 0), 0) / a[1].length;
-      const avgB = b[1].reduce((acc, x) => acc + (x.perubahan_pct ?? 0), 0) / b[1].length;
+      const avgA = sectorStats(a[1]).avgPct ?? 0;
+      const avgB = sectorStats(b[1]).avgPct ?? 0;
       return Math.abs(avgB) - Math.abs(avgA); // most volatile sectors first
     });
   }, [filtered]);
@@ -190,7 +196,8 @@ export function Heatmap() {
   // Market summary
   const allGaining = filtered.filter((x) => (x.perubahan_pct ?? 0) > 0).length;
   const allLosing  = filtered.filter((x) => (x.perubahan_pct ?? 0) < 0).length;
-  const allFlat    = filtered.length - allGaining - allLosing;
+  const allFlat = filtered.filter((x) => x.perubahan_pct === 0).length;
+  const unavailable = filtered.length - allGaining - allLosing - allFlat;
 
   const displayGroups = showAll ? groups : groups.slice(0, 6);
 
@@ -204,7 +211,7 @@ export function Heatmap() {
               Peta Panas Pasar (Market Heatmap)
             </h1>
             <span className="rounded-full bg-emerald-100 px-3 py-0.5 text-xs font-semibold text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300">
-              IDX Live
+              Data IDX
             </span>
           </div>
           <p className="text-sm text-zinc-600 dark:text-zinc-400">
@@ -214,6 +221,7 @@ export function Heatmap() {
 
         <div className="flex flex-wrap items-center gap-2.5">
           <select
+            aria-label="Filter sektor"
             value={selectedSektor}
             onChange={(e) => setSelectedSektor(e.target.value)}
             className="rounded-xl border border-zinc-200 bg-white px-3.5 py-2 text-sm text-zinc-800 outline-none focus:border-green-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
@@ -234,6 +242,7 @@ export function Heatmap() {
               </button>
             ))}
           </div>
+          {unavailable > 0 && <p className="text-xs text-zinc-600 dark:text-zinc-400">{unavailable} perubahan harga belum tersedia</p>}
         </div>
       </div>
 
@@ -276,7 +285,7 @@ export function Heatmap() {
               <span className="font-extrabold text-zinc-900 dark:text-zinc-100">{hovered.kode}</span>
               <span className="ml-2.5 font-semibold text-zinc-600 dark:text-zinc-400">{rp(hovered.harga)}</span>
               <span className={`ml-2.5 font-bold ${(hovered.perubahan_pct ?? 0) >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
-                {(hovered.perubahan_pct ?? 0) >= 0 ? "+" : ""}{num(hovered.perubahan_pct, 2)}%
+                {hovered.perubahan_pct === null ? "Perubahan belum tersedia" : `${hovered.perubahan_pct >= 0 ? "+" : ""}${num(hovered.perubahan_pct, 2)}%`}
               </span>
               <span className="ml-2.5 text-zinc-500 dark:text-zinc-400">MCap: {compact(hovered.mcap)}</span>
             </div>
@@ -290,6 +299,15 @@ export function Heatmap() {
             <div className="mx-auto mb-4 h-8 w-8 animate-spin rounded-full border-4 border-zinc-100 border-t-green-500 dark:border-zinc-800 dark:border-t-green-400" />
             <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400">Memuat visualisasi peta panas pasar...</p>
           </div>
+        </div>
+      ) : error ? (
+        <div className="ios-glass-canvas space-y-3 rounded-2xl p-6 text-center text-sm">
+          <p role="alert">Peta panas gagal dimuat.</p>
+          <button type="button" className="control-button ios-glass-pill rounded-xl font-semibold" onClick={() => {
+            setError(false);
+            setLoading(true);
+            setRetry((value) => value + 1);
+          }}>Coba lagi</button>
         </div>
       ) : groups.length === 0 ? (
         <div className="rounded-2xl border border-zinc-200 bg-white p-12 text-center text-zinc-500 dark:border-zinc-800 dark:bg-[#1a1d27] dark:text-zinc-400">

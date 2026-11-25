@@ -15,6 +15,8 @@ export async function GET(request: NextRequest) {
   const p = request.nextUrl.searchParams;
   const q = (p.get("q") ?? "").trim().toLowerCase();
   const category = p.get("category");
+  const symbols = p.get("symbols");
+  const requested = symbols === null ? null : new Set(symbols.toUpperCase().split(",").slice(0, 100).filter((symbol) => /^[A-Z0-9]{1,20}$/.test(symbol)));
   const sort = p.get("sort") || "mcap";
   const field = Object.hasOwn(SORT_FIELDS, sort) ? SORT_FIELDS[sort as keyof typeof SORT_FIELDS] : "market_cap_usd";
   const dir = p.get("dir") === "asc" ? 1 : -1;
@@ -25,7 +27,8 @@ export async function GET(request: NextRequest) {
   try {
     const [{ items, updatedAt }, fearGreed] = await Promise.all([getCryptoUniverse(force), getLiveFearAndGreed()]);
     const filtered = items.filter((coin) =>
-      (!q || coin.symbol.toLowerCase().includes(q) || coin.name.toLowerCase().includes(q))
+      (!requested || requested.has(coin.symbol))
+      && (!q || coin.symbol.toLowerCase().includes(q) || coin.name.toLowerCase().includes(q))
       && (!category || category === "Semua" || coin.category === category),
     );
     filtered.sort((a, b) => {

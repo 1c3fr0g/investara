@@ -7,6 +7,7 @@ import type { Detail, ListResponse } from "@/lib/types";
 import { compact, num, pct, rp } from "@/lib/format";
 import { Card } from "./ui";
 import { StarButton } from "./Watchlist";
+import { useComparisonData } from "./useComparisonData";
 
 const COLORS = ["#16a34a", "#2563eb", "#d97706", "#9333ea"];
 const MAX = 4;
@@ -121,24 +122,14 @@ export function Compare() {
   const router = useRouter();
   const sp = useSearchParams();
   const codes = useMemo(
-    () => [...new Set((sp.get("k") ?? "").toUpperCase().split(",").filter((k) => /^[A-Z0-9]{4}$/.test(k)))].slice(0, MAX),
+    () => [...new Set((sp.get("k") ?? "").toUpperCase().split(",").map((k) => k.trim()).filter((k) => /^[A-Z0-9]{4}$/.test(k)))].slice(0, MAX),
     [sp],
   );
-  const [cache, setCache] = useState<Record<string, Detail | null>>({});
+  const { cache, retry } = useComparisonData<Detail>(codes, "/api/saham");
   const [q, setQ] = useState("");
   const [saran, setSaran] = useState<{ kode: string; nama: string }[]>([]);
 
   const setCodes = (next: string[]) => router.replace(next.length ? `/bandingkan?k=${next.join(",")}` : "/bandingkan", { scroll: false });
-
-  useEffect(() => {
-    for (const k of codes) {
-      if (k in cache) continue;
-      fetch(`/api/saham/${k}`)
-        .then((r) => (r.ok ? r.json() : null))
-        .then((d: Detail | null) => setCache((p) => ({ ...p, [k]: d })))
-        .catch(() => setCache((p) => ({ ...p, [k]: null })));
-    }
-  }, [codes, cache]);
 
   useEffect(() => {
     const term = q.trim();
@@ -157,7 +148,8 @@ export function Compare() {
   }, [q]);
 
   const details = codes.map((k) => cache[k]).filter((d): d is Detail => !!d);
-  const loading = codes.some((k) => !(k in cache));
+  const loading = codes.some((k) => cache[k] === undefined);
+  const failed = codes.filter((k) => cache[k] === null);
 
   function tambah(kode: string) {
     if (codes.includes(kode) || codes.length >= MAX) return;
@@ -194,7 +186,7 @@ export function Compare() {
             </span>
           ))}
           {codes.length < MAX && (
-            <div className="relative">
+            <div className="relative min-w-0 max-w-full">
               <input
                 value={q}
                 onChange={(e) => {
@@ -202,10 +194,11 @@ export function Compare() {
                   if (!e.target.value.trim()) setSaran([]);
                 }}
                 placeholder="Tambah saham (kode/nama)..."
-                className="w-64 rounded-xl border border-zinc-200 bg-white px-3.5 py-2 text-xs outline-none focus:border-green-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                aria-label="Cari kode atau nama saham"
+                className="w-64 max-w-full rounded-xl border border-zinc-200 bg-white px-3.5 py-2 text-xs outline-none focus:border-green-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
               />
               {q.trim() && saran.length > 0 && (
-                <ul className="absolute z-10 mt-1.5 w-80 overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-lg dark:border-zinc-800 dark:bg-zinc-900">
+                <ul className="absolute inset-x-0 z-10 mt-1.5 overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-lg dark:border-zinc-800 dark:bg-zinc-900">
                   {saran.map((s) => (
                     <li key={s.kode}>
                       <button
@@ -231,6 +224,12 @@ export function Compare() {
         </Card>
       )}
       {loading && <p className="text-sm font-medium text-zinc-500 dark:text-zinc-400">Memuat data perbandingan...</p>}
+      {failed.length > 0 && (
+        <Card className="flex flex-wrap items-center gap-3 p-4 text-sm">
+          <p role="status">Data {failed.join(", ")} belum tersedia.</p>
+          <button type="button" onClick={() => retry(failed)} className="control-button ios-glass-pill rounded-xl font-semibold">Coba lagi</button>
+        </Card>
+      )}
 
       {details.length >= 1 && (
         <>

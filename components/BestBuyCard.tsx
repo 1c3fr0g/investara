@@ -23,7 +23,7 @@ export function BestBuyCard({ kode, nama, harga, bestBuy, onSetAlert }: BestBuyC
 
   const handleSimulate = () => {
     const recommendedLot = Math.max(5, Math.min(100, Math.round(5_000_000 / (harga * 100))));
-    openTrade({
+    const trade = openTrade({
       kode,
       nama,
       entryPrice: bestBuy.entryHigh,
@@ -35,7 +35,9 @@ export function BestBuyCard({ kode, nama, harga, bestBuy, onSetAlert }: BestBuyC
       notes: `Best Buy Zone Entry di ${rp(bestBuy.entryHigh)} (${bestBuy.statusLabel})`,
     });
 
-    setToast(`✓ Berhasil membuka simulasi ${kode} di harga ${rp(bestBuy.entryHigh)} (${recommendedLot} Lot)!`);
+    setToast(trade
+      ? `Simulasi ${kode} dibuka di ${rp(bestBuy.entryHigh)} (${recommendedLot} lot).`
+      : `Saldo simulasi belum cukup untuk membuka ${recommendedLot} lot ${kode}.`);
     setTimeout(() => setToast(null), 5000);
   };
 
@@ -138,7 +140,7 @@ export function BestBuyCard({ kode, nama, harga, bestBuy, onSetAlert }: BestBuyC
             {rp(bestBuy.tp1Price)}
           </div>
           <div className="mt-1 text-[11px] font-bold text-[#22C55E] tabular-nums">
-            +{bestBuy.tp1Pct}% (Ambil Sebagian)
+            +{num(bestBuy.tp1Pct, 1)}%
           </div>
         </div>
 
@@ -151,7 +153,7 @@ export function BestBuyCard({ kode, nama, harga, bestBuy, onSetAlert }: BestBuyC
             {rp(bestBuy.tp2Price)}
           </div>
           <div className="mt-1 text-[11px] font-bold text-[#22C55E] tabular-nums">
-            +{bestBuy.tp2Pct}% (Swing Max)
+            +{num(bestBuy.tp2Pct, 1)}%
           </div>
         </div>
 
@@ -164,7 +166,7 @@ export function BestBuyCard({ kode, nama, harga, bestBuy, onSetAlert }: BestBuyC
             {rp(bestBuy.slPrice)}
           </div>
           <div className="mt-1 text-[11px] font-bold text-[#FB6767] tabular-nums">
-            {bestBuy.slPct}% (Proteksi Modal)
+            {num(bestBuy.slPct, 1)}%
           </div>
         </div>
       </div>

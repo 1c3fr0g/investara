@@ -15,6 +15,12 @@ npm run build
 
 Copy the variable names from [.env.example](.env.example) into your local configuration. Set the Auth.js secret for sign-in, optional OAuth credentials for the login providers you use, and optional Gemini credentials for the AI analyst.
 
+### Bandarmology and Insider
+
+Stock details show a 20-session Chaikin Money Flow indicator from historical prices, the available Yahoo Finance insider ownership snapshot, and links to BEI. Past-session CMF describes price and volume pressure. It cannot identify a broker or investor.
+
+Configure the optional server-only `INVEZGO_API_KEY` locally or in Vercel for automatic [net stock broker summaries](https://docs.invezgo.com/en/api-usage/endpoint/broker-flow/summary-stock/) and [insider disclosures](https://docs.invezgo.com/en/api-usage/endpoint/shareholder/shareholder-insider/). Use a plan that covers both endpoints and permits your intended display of the data. Without access, Investara can show gross broker volume from IPOT via [Midori Research](https://ihsg.midoriresearch.com/docs/json-output), a dated single-session foreign flow snapshot if available, and manually verified [BEI ownership disclosures](https://www.idx.co.id/id/berita/pengumuman/). The verified archive currently covers ANTM. Each archived report links to the original filing.
+
 ## Market data and news
 
 Crypto prices come from Binance Spot in USDT or Yahoo Finance in USD. The list labels each quote with its provider and available timestamp. IDR uses a fixed reference rate of Rp15.850. Market-cap totals and BTC share cover assets with Yahoo Finance capitalization data. A missing value appears as a dash, and the market-cap ranking excludes missing and stale values. Crypto technical indicators and historical simulations use daily Yahoo Finance prices.
@@ -24,6 +30,16 @@ Macro quotes keep the original provider timestamp when the app serves a saved qu
 ## Portfolio
 
 New trades recorded in Investara update the portfolio and transaction log together. Sales consume the oldest available lots first. Deleting a linked transaction recalculates the remaining holdings. If that would leave a later sale without enough lots, correct the sale first. Existing holdings enter the calculation as opening positions, and older log entries remain visible as history.
+
+## Offline paper trading
+
+Sign in from the browser that holds your paper positions, open Simulasi, and activate **Pantau offline**. Wait for **Tersinkron** after activating or opening a position. The server stores the target prices and simulated exits. The simulation history and starting balance stay in the browser, which imports server results when you return.
+
+Vercel Schedules checks paper positions every 15 minutes, from 09:00 through 16:45 WIB on weekdays, using `CRON_SECRET`. The final checks cover the regular market's post-closing session. Hobby can start each run within a 15-minute window after the scheduled time. The 32 weekday checks use up to 736 scheduled runs in a 31-day month, out of the team's 5,000-run allowance. [Vercel Schedules limits](https://vercel.com/docs/schedules/limits)
+
+The sweep checks completed Yahoo Finance five-minute candles from the past seven days. The first completed candle starting after registration can count. A target reached within a candle closes the whole position at the configured level. If TP and SL are both touched and the opening price does not establish which was reached first, SL takes priority. The timestamp shown is the end of the matching candle. Missing candles can leave a position open until data is available. Each sweep checks up to 40 ticker symbols, prioritizing those checked least recently.
+
+To trigger the same sweep on a standalone deployment, send GET `/api/internal/simulasi/sweep` with `Authorization: Bearer <CRON_SECRET>` from a scheduler.
 
 ## Free hosting on Vercel
 

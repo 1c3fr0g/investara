@@ -237,14 +237,14 @@ export function MarketOverview() {
               <div>
                 <div className="flex items-center gap-2">
                   <h2 className="text-lg font-bold tracking-tight text-zinc-950 dark:text-zinc-100">
-                    🌊 Arus Dana Asing &amp; Smart Money (Foreign Flow)
+                    🌊 Proksi Arus Pasar (CMF)
                   </h2>
                   <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-[11px] font-bold text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300">
-                    Live Inflow &amp; CMF
+                    Indikator teknikal
                   </span>
                 </div>
                 <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                  Estimasi arus akumulasi dan distribusi modal institusi / asing berdasarkan Chaikin Money Flow dan transaksi bursa.
+                  Proksi dihitung dari Chaikin Money Flow (CMF) dikali nilai transaksi.
                 </p>
               </div>
 
@@ -252,7 +252,7 @@ export function MarketOverview() {
                 <div className="flex items-center gap-3">
                   <div className="rounded-2xl border border-zinc-200/80 bg-white/80 px-4 py-2 text-right shadow-xs backdrop-blur-md dark:border-white/[0.08] dark:bg-[#141821]/75">
                     <span className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400 dark:text-zinc-500">
-                      Total Net Asing IDX
+                      Total Proksi Arus
                     </span>
                     <span
                       className={`text-sm font-black tabular-nums ${
@@ -267,7 +267,7 @@ export function MarketOverview() {
                   </div>
                   <div className="rounded-2xl border border-zinc-200/80 bg-white/80 px-4 py-2 text-right shadow-xs backdrop-blur-md dark:border-white/[0.08] dark:bg-[#141821]/75">
                     <span className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400 dark:text-zinc-500">
-                      Sentimen Smart Money
+                      Arah CMF
                     </span>
                     <span className="text-sm font-bold text-zinc-900 dark:text-zinc-100">
                       {d.foreignSummary.sentiment}
@@ -279,14 +279,14 @@ export function MarketOverview() {
 
             <div className="grid gap-6 md:grid-cols-2">
               <MoverTable
-                title="Top Akumulasi Asing (Net Buy)"
-                note="Saham dengan estimasi aliran dana masuk asing/institusi terbesar hari ini"
+                title="Proksi Akumulasi Tertinggi"
+                note="Saham dengan proksi CMF positif terbesar"
                 rows={d.foreignTopBuy ?? []}
                 mode="foreign"
               />
               <MoverTable
-                title="Top Distribusi Asing (Net Sell)"
-                note="Saham dengan estimasi pelepasan/aliran keluar dana asing terbesar hari ini"
+                title="Proksi Distribusi Tertinggi"
+                note="Saham dengan proksi CMF negatif terbesar"
                 rows={d.foreignTopSell ?? []}
                 mode="foreign"
               />
@@ -300,7 +300,7 @@ export function MarketOverview() {
           </div>
 
           <p className="text-xs text-zinc-400 dark:text-zinc-500 leading-relaxed pt-2">
-            Sumber: Yahoo Finance dan TradingView (tertunda 10–15 menit). Perhitungan Foreign Flow dianalisis dari data volume bobot harga, CMF (Chaikin Money Flow), dan transaksi pasar harian.
+            Data harga dari Yahoo Finance dan indikator CMF dari TradingView.
           </p>
         </>
       )}

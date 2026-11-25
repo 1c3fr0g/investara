@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { CryptoCategory, CryptoFearGreed, CryptoItem } from "@/lib/types";
 import { Card } from "./ui";
 import { CoinIcon } from "./CoinIcon";
@@ -94,8 +94,12 @@ export function CryptoHeatmap() {
   const [viewMode, setViewMode] = useState<"category" | "all">("category");
   const [search, setSearch] = useState("");
   const [hoveredCoin, setHoveredCoin] = useState<CryptoItem | null>(null);
+  const [failed, setFailed] = useState(false);
+  const inFlight = useRef(false);
 
   const fetchData = async (force = false, isBackground = false) => {
+    if (inFlight.current) return;
+    inFlight.current = true;
     if (force) setRefreshing(true);
     if (!isBackground && !data) setLoading(true);
     try {
@@ -109,9 +113,11 @@ export function CryptoHeatmap() {
       if (!res.ok) throw new Error("Gagal mengambil data crypto");
       const json: CryptoApiResponse = await res.json();
       setData(json);
-    } catch (err) {
-      console.error("Gagal mengambil data crypto heatmap", err);
+      setFailed(false);
+    } catch {
+      setFailed(true);
     } finally {
+      inFlight.current = false;
       setLoading(false);
       setRefreshing(false);
     }
@@ -382,6 +388,18 @@ export function CryptoHeatmap() {
       </Card>
 
       {/* ── Loading Spinner State ────────────────────────────────────────────── */}
+      {failed && (
+        <Card className="flex flex-wrap items-center gap-3 p-4 text-sm">
+          <p role="alert">{data ? "Pembaruan gagal. Peta menunjukkan data terakhir." : "Peta panas kripto gagal dimuat."}</p>
+          <button type="button" disabled={refreshing} onClick={() => void fetchData(true)}
+            className="control-button ios-glass-pill rounded-xl font-semibold">Coba lagi</button>
+        </Card>
+      )}
+      {data && !loading && filteredItems.length === 0 && (
+        <Card className="p-5 text-sm"><p role="status">
+          {search.trim() ? "Koin yang cocok dengan pencarian belum tersedia." : "Perubahan harga kripto belum tersedia."}
+        </p></Card>
+      )}
       {loading && !data && (
         <Card className="flex flex-col items-center justify-center py-24 text-center">
           <div className="mb-4 h-10 w-10 animate-spin rounded-full border-4 border-zinc-200 border-t-emerald-500 dark:border-zinc-800 dark:border-t-emerald-400" />

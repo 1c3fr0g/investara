@@ -12,7 +12,7 @@ export async function generateMetadata({ params }: PageProps<"/saham/[kode]">) {
 
 async function Content({ params }: { params: PageProps<"/saham/[kode]">["params"] }) {
   const { kode } = await params;
-  return <StockDetail kode={kode.toUpperCase()} />;
+  return <StockDetail key={kode.toUpperCase()} kode={kode.toUpperCase()} />;
 }
 
 export default function Page(props: PageProps<"/saham/[kode]">) {

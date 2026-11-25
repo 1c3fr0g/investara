@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useState, useSyncExternalStore, useCallback, useRef } from "react";
+import type { OfflineFill } from "./paperOffline";
+import type { ListResponse } from "./types";
 
 export type TradeStatus = "OPEN" | "TP1_HIT" | "TP2_HIT" | "SL_HIT" | "CLOSED";
 
@@ -35,6 +37,7 @@ export interface PaperTrade {
   highestPrice?: number;
   lowestPrice?: number;
   currentPrice?: number;
+  quoteAt?: number;
   unrealizedPnlRp?: number;
   unrealizedPnlPct?: number;
 }
@@ -92,6 +95,7 @@ export interface BatchPerformance {
 const STORAGE_KEY = "investara_paper_trades";
 const BALANCE_KEY = "investara_paper_starting_balance";
 const DEFAULT_STARTING_BALANCE = 50_000_000; // Rp 50 Juta
+const EMPTY_SERVER_TRADES: PaperTrade[] = [];
 
 // In-memory cache for useSyncExternalStore
 let cachedTrades: PaperTrade[] = [];
@@ -110,13 +114,9 @@ function loadFromStorage(): PaperTrade[] {
   if (typeof window === "undefined") return [];
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) {
-      // Seed with initial realistic simulation data on first run
-      const initial = getSeedData();
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(initial));
-      return initial;
-    }
-    return JSON.parse(raw);
+    if (!raw) return [];
+    const trades: PaperTrade[] = JSON.parse(raw);
+    return trades.filter((trade) => trade.id !== "pt_seed_bbca" && trade.id !== "pt_seed_tlkm");
   } catch (e) {
     console.error("Failed to parse paper trades from localStorage", e);
     return [];
@@ -158,6 +158,32 @@ export function savePaperTrades(trades: PaperTrade[]) {
   notify();
 }
 
+export function applyOfflinePaperFills(fills: OfflineFill[]) {
+  if (!fills.length) return;
+  const byId = new Map(fills.map((fill) => [fill.id, fill]));
+  let changed = false;
+  const trades = getPaperTrades().map((trade) => {
+    const fill = byId.get(trade.id);
+    if (!fill || (trade.status !== "OPEN" && !(fill.exitAt < Date.parse(trade.exitDate ?? "")))) return trade;
+    const pnl = fill.exitPrice - trade.entryPrice;
+    changed = true;
+    return {
+      ...trade,
+      status: fill.status,
+      exitDate: new Date(fill.exitAt).toISOString(),
+      exitPrice: fill.exitPrice,
+      currentPrice: fill.exitPrice,
+      highestPrice: Math.max(trade.highestPrice ?? trade.entryPrice, fill.exitPrice),
+      lowestPrice: Math.min(trade.lowestPrice ?? trade.entryPrice, fill.exitPrice),
+      realizedPnlRp: pnl * trade.shares,
+      realizedPnlPct: Number(((pnl / trade.entryPrice) * 100).toFixed(2)),
+      unrealizedPnlRp: 0,
+      unrealizedPnlPct: 0,
+    };
+  });
+  if (changed) savePaperTrades(trades);
+}
+
 export function getStartingBalance(): number {
   ensureLoaded();
   return cachedBalance;
@@ -186,9 +212,10 @@ export function openPaperTrade(params: {
   targetTp1Pct?: number;
   targetTp2Pct?: number;
   stopLossPct?: number;
-}): PaperTrade {
+}): PaperTrade | null {
   ensureLoaded();
-  const lot = Math.max(1, params.lot ?? 10);
+  const lot = params.lot ?? 10;
+  if (!Number.isSafeInteger(lot) || lot < 1 || !Number.isFinite(params.entryPrice) || params.entryPrice < 2) return null;
   const shares = lot * 100;
   const entryPrice = Math.max(1, Math.round(params.entryPrice));
   const totalInvested = shares * entryPrice;
@@ -196,13 +223,15 @@ export function openPaperTrade(params: {
   const tp1Pct = params.targetTp1Pct ?? 1.5;
   const tp2Pct = params.targetTp2Pct ?? 3.0;
   const slPct = params.stopLossPct ?? -2.0;
+  if (![tp1Pct, tp2Pct, slPct].every(Number.isFinite) || tp1Pct <= 0 || tp2Pct < tp1Pct || slPct >= 0 || slPct <= -100
+    || totalInvested > calculateSummary(cachedTrades, cachedBalance).availableCash) return null;
 
-  const targetTp1 = Math.round(entryPrice * (1 + tp1Pct / 100));
-  const targetTp2 = Math.round(entryPrice * (1 + tp2Pct / 100));
-  const stopLoss = Math.round(entryPrice * (1 + slPct / 100));
+  const targetTp1 = Math.max(entryPrice + 1, Math.round(entryPrice * (1 + tp1Pct / 100)));
+  const targetTp2 = Math.max(targetTp1, Math.round(entryPrice * (1 + tp2Pct / 100)));
+  const stopLoss = Math.min(entryPrice - 1, Math.max(1, Math.round(entryPrice * (1 + slPct / 100))));
 
   const newTrade: PaperTrade = {
-    id: `pt_${Date.now()}_${params.kode.toLowerCase()}`,
+    id: `pt_${crypto.randomUUID()}`,
     kode: params.kode.toUpperCase(),
     nama: params.nama,
     entryDate: new Date().toISOString(),
@@ -247,6 +276,7 @@ export function openBatchPaperTrades(
   ensureLoaded();
   const existingKodes = new Set(cachedTrades.filter((t) => t.status === "OPEN").map((t) => t.kode));
   const newTrades: PaperTrade[] = [];
+  let remainingCash = calculateSummary(cachedTrades, cachedBalance).availableCash;
   const tag =
     batchTag ||
     `Batch Swing ${new Date().toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" })}`;
@@ -255,19 +285,23 @@ export function openBatchPaperTrades(
     if (!item.kode) continue;
     const kodeUpper = item.kode.toUpperCase();
     if (existingKodes.has(kodeUpper)) continue;
-    if (!item.entryPrice || item.entryPrice <= 0) continue;
+    if (!Number.isFinite(item.entryPrice) || item.entryPrice < 2) continue;
 
     const lot = item.lot ?? Math.max(5, Math.min(100, Math.round(5_000_000 / (item.entryPrice * 100))));
+    if (!Number.isSafeInteger(lot) || lot < 1) continue;
     const shares = lot * 100;
     const entryPrice = Math.round(item.entryPrice);
     const totalInvested = shares * entryPrice;
+    if (totalInvested > remainingCash) continue;
+    remainingCash -= totalInvested;
+    existingKodes.add(kodeUpper);
 
-    const targetTp1 = Math.round(entryPrice * 1.015);
-    const targetTp2 = Math.round(entryPrice * 1.03);
-    const stopLoss = Math.round(entryPrice * 0.98);
+    const targetTp1 = Math.max(entryPrice + 1, Math.round(entryPrice * 1.015));
+    const targetTp2 = Math.max(targetTp1, Math.round(entryPrice * 1.03));
+    const stopLoss = Math.min(entryPrice - 1, Math.round(entryPrice * 0.98));
 
     newTrades.push({
-      id: `pt_${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${kodeUpper.toLowerCase()}`,
+      id: `pt_${crypto.randomUUID()}`,
       kode: kodeUpper,
       nama: item.nama || `${kodeUpper} Tbk`,
       entryDate: new Date().toISOString(),
@@ -301,22 +335,18 @@ export function openBatchPaperTrades(
   return newTrades.length;
 }
 
-export function closePaperTrade(
-  id: string,
-  exitPrice?: number,
-  exitStatus: TradeStatus = "CLOSED"
-): PaperTrade | null {
+export function closePaperTrade(id: string): PaperTrade | null {
   ensureLoaded();
   let closedItem: PaperTrade | null = null;
 
   const updated = cachedTrades.map((t) => {
     if (t.id === id && t.status === "OPEN") {
-      const price = exitPrice ?? t.currentPrice ?? t.entryPrice;
+      const price = t.currentPrice ?? t.entryPrice;
       const realizedPnlRp = (price - t.entryPrice) * t.shares;
       const realizedPnlPct = Number((((price - t.entryPrice) / t.entryPrice) * 100).toFixed(2));
       closedItem = {
         ...t,
-        status: exitStatus,
+        status: "CLOSED",
         exitDate: new Date().toISOString(),
         exitPrice: price,
         realizedPnlRp,
@@ -335,26 +365,14 @@ export function closePaperTrade(
   return closedItem;
 }
 
-export function closeAllPaperTrades(
-  mode: "live" | "tp1" | "tp2" = "live"
-): { count: number; totalPnlRp: number } {
+export function closeAllPaperTrades(): { count: number; totalPnlRp: number } {
   ensureLoaded();
   let count = 0;
   let totalPnlRp = 0;
 
-  const updated = cachedTrades.map((t) => {
+  const updated = cachedTrades.map((t): PaperTrade => {
     if (t.status === "OPEN") {
-      let price = t.currentPrice ?? t.entryPrice;
-      let status: TradeStatus = "CLOSED";
-
-      if (mode === "tp1") {
-        price = t.targetTp1;
-        status = "TP1_HIT";
-      } else if (mode === "tp2") {
-        price = t.targetTp2;
-        status = "TP2_HIT";
-      }
-
+      const price = t.currentPrice ?? t.entryPrice;
       const realizedPnlRp = (price - t.entryPrice) * t.shares;
       const realizedPnlPct = Number((((price - t.entryPrice) / t.entryPrice) * 100).toFixed(2));
       count++;
@@ -362,7 +380,7 @@ export function closeAllPaperTrades(
 
       return {
         ...t,
-        status,
+        status: "CLOSED",
         exitDate: new Date().toISOString(),
         exitPrice: price,
         realizedPnlRp,
@@ -390,60 +408,58 @@ export function resetPaperTrades() {
   savePaperTrades([]);
 }
 
-export function restoreDefaultSeedTrades() {
-  savePaperTrades(getSeedData());
-}
+type PaperQuote = { price: number; at: number };
 
 export function evaluateTradesWithLivePrices(
   trades: PaperTrade[],
-  livePrices: Record<string, number>
-): { updatedTrades: PaperTrade[]; hasChanges: boolean } {
+  quotes: ReadonlyMap<string, PaperQuote>,
+  now = Date.now(),
+) {
   let hasChanges = false;
+  let checked = 0;
+  let closed = 0;
 
   const updatedTrades = trades.map((t) => {
     if (t.status !== "OPEN") return t;
-    const live = livePrices[t.kode];
-    if (live === undefined || live === null || live <= 0) return t;
+    const quote = quotes.get(t.kode);
+    const entryAt = Date.parse(t.entryDate);
+    if (!quote || !Number.isFinite(quote.price) || quote.price <= 0 || !Number.isFinite(quote.at)
+      || !Number.isFinite(entryAt) || quote.at < entryAt || quote.at < (t.quoteAt ?? 0) || quote.at > now) return t;
+    const live = quote.price;
+    checked++;
 
     let nextStatus: TradeStatus = "OPEN";
-    let exitPrice: number | undefined = undefined;
-    let exitDate: string | undefined = undefined;
-    let realizedPnlRp: number | undefined = undefined;
-    let realizedPnlPct: number | undefined = undefined;
+    let exitPrice: number | undefined;
 
     const highest = Math.max(t.highestPrice ?? t.entryPrice, live);
     const lowest = Math.min(t.lowestPrice ?? t.entryPrice, live);
 
-    // Rule 1: Hit TP2 (+3.0%)
     if (live >= t.targetTp2) {
       nextStatus = "TP2_HIT";
       exitPrice = t.targetTp2;
-      exitDate = new Date().toISOString();
-      realizedPnlRp = (exitPrice - t.entryPrice) * t.shares;
-      realizedPnlPct = Number((((exitPrice - t.entryPrice) / t.entryPrice) * 100).toFixed(2));
-      hasChanges = true;
-    }
-    // Rule 2: Hit Stop Loss (-2.0%)
-    else if (live <= t.stopLoss) {
+    } else if (live <= t.stopLoss) {
       nextStatus = "SL_HIT";
       exitPrice = t.stopLoss;
-      exitDate = new Date().toISOString();
-      realizedPnlRp = (exitPrice - t.entryPrice) * t.shares;
-      realizedPnlPct = Number((((exitPrice - t.entryPrice) / t.entryPrice) * 100).toFixed(2));
-      hasChanges = true;
+    } else if (live >= t.targetTp1) {
+      nextStatus = "TP1_HIT";
+      exitPrice = t.targetTp1;
     }
 
-    if (nextStatus !== "OPEN") {
+    if (exitPrice !== undefined) {
+      const pnlPerShare = exitPrice - t.entryPrice;
+      hasChanges = true;
+      closed++;
       return {
         ...t,
         status: nextStatus,
-        exitDate,
+        exitDate: new Date(quote.at).toISOString(),
         exitPrice,
-        realizedPnlRp,
-        realizedPnlPct,
+        realizedPnlRp: pnlPerShare * t.shares,
+        realizedPnlPct: Number(((pnlPerShare / t.entryPrice) * 100).toFixed(2)),
         highestPrice: highest,
         lowestPrice: lowest,
         currentPrice: live,
+        quoteAt: quote.at,
         unrealizedPnlRp: 0,
         unrealizedPnlPct: 0,
       };
@@ -455,6 +471,7 @@ export function evaluateTradesWithLivePrices(
 
     if (
       t.currentPrice !== live ||
+      t.quoteAt !== quote.at ||
       t.highestPrice !== highest ||
       t.lowestPrice !== lowest ||
       t.unrealizedPnlRp !== unrealizedPnlRp
@@ -463,6 +480,7 @@ export function evaluateTradesWithLivePrices(
       return {
         ...t,
         currentPrice: live,
+        quoteAt: quote.at,
         highestPrice: highest,
         lowestPrice: lowest,
         unrealizedPnlRp,
@@ -473,7 +491,7 @@ export function evaluateTradesWithLivePrices(
     return t;
   });
 
-  return { updatedTrades, hasChanges };
+  return { updatedTrades, hasChanges, checked, closed };
 }
 
 export function calculateSummary(
@@ -517,7 +535,7 @@ export function calculateSummary(
     closedTradesCount > 0 ? Number(((winningTrades / closedTradesCount) * 100).toFixed(1)) : 0;
   const totalRealizedPnlPct =
     startingBalance > 0 ? Number(((totalRealizedPnlRp / startingBalance) * 100).toFixed(2)) : 0;
-  const profitFactor = grossLoss > 0 ? Number((grossProfit / grossLoss).toFixed(2)) : grossProfit > 0 ? 99 : 0;
+  const profitFactor = grossLoss > 0 ? Number((grossProfit / grossLoss).toFixed(2)) : grossProfit > 0 ? Infinity : 0;
 
   return {
     startingBalance,
@@ -686,70 +704,7 @@ export function getBatchPerformanceList(trades: PaperTrade[]): BatchPerformance[
   return results.sort((a, b) => new Date(b.startDate).getTime() - new Date(a.startDate).getTime());
 }
 
-// Pre-seeded verified trades to showcase backtested realism
-function getSeedData(): PaperTrade[] {
-  const d = new Date();
-  const d1 = new Date(d.getTime() - 2 * 86400000).toISOString();
-  const d2 = new Date(d.getTime() - 1 * 86400000).toISOString();
-  const d3 = new Date(d.getTime() - 4 * 3600000).toISOString();
-
-  return [
-    {
-      id: "pt_seed_bbca",
-      kode: "BBCA",
-      nama: "Bank Central Asia Tbk",
-      entryDate: d1,
-      entryPrice: 10150,
-      lot: 20,
-      shares: 2000,
-      totalInvested: 20300000,
-      targetTp1: 10300,
-      targetTp1Pct: 1.5,
-      targetTp2: 10450,
-      targetTp2Pct: 3.0,
-      stopLoss: 9950,
-      stopLossPct: -2.0,
-      convictionScore: 92,
-      isMsci: true,
-      status: "TP2_HIT",
-      exitDate: d2,
-      exitPrice: 10450,
-      realizedPnlRp: 600000,
-      realizedPnlPct: 2.96,
-      highestPrice: 10500,
-      lowestPrice: 10125,
-      notes: "Radar Swing 92% - MSCI Standard & Akumulasi Asing",
-    },
-    {
-      id: "pt_seed_tlkm",
-      kode: "TLKM",
-      nama: "Telkom Indonesia Tbk",
-      entryDate: d2,
-      entryPrice: 2850,
-      lot: 50,
-      shares: 5000,
-      totalInvested: 14250000,
-      targetTp1: 2900,
-      targetTp1Pct: 1.75,
-      targetTp2: 2940,
-      targetTp2Pct: 3.16,
-      stopLoss: 2790,
-      stopLossPct: -2.1,
-      convictionScore: 88,
-      isMsci: true,
-      status: "TP1_HIT",
-      exitDate: d3,
-      exitPrice: 2900,
-      realizedPnlRp: 250000,
-      realizedPnlPct: 1.75,
-      highestPrice: 2910,
-      lowestPrice: 2840,
-      notes: "Rebound Support Kuat MA20 + CMF Positif",
-    },
-  ];
-}
-
-const subscribe = (callback: () => void) => {
+export const subscribePaperTrades = (callback: () => void) => {
   listeners.add(callback);
   const handleStorage = (e: StorageEvent) => {
     if (e.key === STORAGE_KEY || e.key === BALANCE_KEY) {
@@ -774,13 +729,15 @@ const getSnapshot = () => {
   return cachedTrades;
 };
 
-const getServerSnapshot = () => [];
+// React reads the same snapshot during server rendering and hydration.
+const getServerSnapshot = () => EMPTY_SERVER_TRADES;
 
 export function usePaperTrading(options: { autoPoll?: boolean; pollIntervalMs?: number } = {}) {
   const { autoPoll = false, pollIntervalMs = 30000 } = options;
-  const trades = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+  const trades = useSyncExternalStore(subscribePaperTrades, getSnapshot, getServerSnapshot);
   const [balance, setBalance] = useState<number>(DEFAULT_STARTING_BALANCE);
   const [loadingPrices, setLoadingPrices] = useState(false);
+  const [priceCheckMessage, setPriceCheckMessage] = useState("");
 
   const isFetchingRef = useRef(false);
   const lastFetchRef = useRef(0);
@@ -799,7 +756,7 @@ export function usePaperTrading(options: { autoPoll?: boolean; pollIntervalMs?: 
 
   const refreshWithLivePrices = useCallback(async (force = false) => {
     const active = openTradesRef.current;
-    const activeKodes = active.map((t) => t.kode);
+    const activeKodes = [...new Set(active.map((t) => t.kode))];
     if (activeKodes.length === 0) return;
 
     const now = Date.now();
@@ -811,25 +768,33 @@ export function usePaperTrading(options: { autoPoll?: boolean; pollIntervalMs?: 
       isFetchingRef.current = true;
       lastFetchRef.current = now;
       setLoadingPrices(true);
+      if (force) setPriceCheckMessage("");
 
-      const res = await fetch(`/api/saham?kodes=${activeKodes.join(",")}&size=100`);
-      if (!res.ok) return;
-      const data = await res.json();
-      if (!data?.items) return;
+      const query = new URLSearchParams({ kodes: activeKodes.join(","), size: "1000" });
+      const res = await fetch(`/api/saham?${query}`);
+      if (!res.ok) throw new Error("Harga pasar tidak tersedia.");
+      const data: ListResponse = await res.json();
 
-      const priceMap: Record<string, number> = {};
+      const quotes = new Map<string, PaperQuote>();
       for (const item of data.items) {
-        if (item.kode && item.harga) {
-          priceMap[item.kode] = item.harga;
+        if (item.harga != null && item.quoteAt != null) {
+          quotes.set(item.kode, { price: item.harga, at: item.quoteAt });
         }
       }
 
-      const { updatedTrades, hasChanges } = evaluateTradesWithLivePrices(getPaperTrades(), priceMap);
+      const current = getPaperTrades();
+      const { updatedTrades, hasChanges, checked, closed } = evaluateTradesWithLivePrices(current, quotes);
       if (hasChanges) {
         savePaperTrades(updatedTrades);
       }
+      if (force) {
+        setPriceCheckMessage(checked === 0
+          ? "Belum ada kuotasi pasar yang bisa dipakai untuk posisi aktif."
+          : `${closed} dari ${checked} posisi yang diperiksa mencapai TP atau SL.`);
+      }
     } catch (err) {
       console.error("Failed to refresh live prices for paper trading", err);
+      if (force) setPriceCheckMessage("Gagal memuat kuotasi pasar. Coba lagi.");
     } finally {
       isFetchingRef.current = false;
       setLoadingPrices(false);
@@ -863,13 +828,13 @@ export function usePaperTrading(options: { autoPoll?: boolean; pollIntervalMs?: 
     closeAllTrades: closeAllPaperTrades,
     deleteTrade: deletePaperTrade,
     resetTrades: resetPaperTrades,
-    restoreDefaultSeedTrades,
     setStartingBalance: (val: number) => {
       setStartingBalance(val);
       setBalance(val);
     },
     refreshWithLivePrices,
     loadingPrices,
+    priceCheckMessage,
   };
 }
 

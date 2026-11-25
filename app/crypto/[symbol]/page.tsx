@@ -16,7 +16,7 @@ export async function generateMetadata({
 
 async function Content({ params }: { params: Promise<{ symbol: string }> }) {
   const { symbol } = await params;
-  return <CryptoDetail symbol={symbol} />;
+  return <CryptoDetail key={symbol.toUpperCase()} symbol={symbol} />;
 }
 
 export default function CryptoDetailPage(props: {

@@ -54,17 +54,17 @@ export async function GET(request: NextRequest) {
     const body: PasarResponse = {
       updatedAt,
       sektor,
-      naik: [...liquid].sort((a, b) => (b.perubahan_pct ?? 0) - (a.perubahan_pct ?? 0)).slice(0, TOP),
-      turun: [...liquid].sort((a, b) => (a.perubahan_pct ?? 0) - (b.perubahan_pct ?? 0)).slice(0, TOP),
+      naik: liquid.filter((item) => item.perubahan_pct! > 0).sort((a, b) => b.perubahan_pct! - a.perubahan_pct!).slice(0, TOP),
+      turun: liquid.filter((item) => item.perubahan_pct! < 0).sort((a, b) => a.perubahan_pct! - b.perubahan_pct!).slice(0, TOP),
       nilai: [...items].sort((a, b) => (b.nilai ?? 0) - (a.nilai ?? 0)).slice(0, TOP),
       foreignTopBuy,
       foreignTopSell,
-      foreignSummary: {
+      foreignSummary: withForeign.length ? {
         netTotal,
         buyCount,
         sellCount,
         sentiment,
-      },
+      } : undefined,
     };
     return NextResponse.json(body);
   } catch (e) {

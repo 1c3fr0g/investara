@@ -3,10 +3,10 @@ import emiten from "./emiten.json";
 import { analyze } from "./analysis";
 import { getTv } from "./tv";
 import type { Detail, ListItem } from "./types";
-import { computeBandarmologi } from "./bandarmologi";
 import { computeBestBuy } from "./bestBuy";
 import { computeDividendHunter } from "./dividendHunter";
 import { fetchStockNews, classifyNewsSentiment, newsArticleUrl } from "./news";
+import type { PaperBar } from "./paperOffline";
 
 const yf = new YahooFinance({ suppressNotices: ["yahooSurvey"] });
 const OPTS = { validateResult: false } as const;
@@ -20,10 +20,24 @@ const EMITEN_BY_CODE = new Map(EMITEN.map((e) => [e.kode, e]));
 export const isKnownCode = (k: string) => EMITEN_BY_CODE.has(k);
 
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+
+export async function getPaperIntradayBars(kode: string, from: number, to: number): Promise<PaperBar[]> {
+  const { quotes } = await yf.chart(`${kode}.JK`, {
+    period1: new Date(from), period2: new Date(to), interval: "5m", includePrePost: false, return: "array",
+  }, { fetchOptions: { signal: AbortSignal.timeout(6_000) } });
+
+  return quotes.flatMap(({ date, open, high, low }) => {
+    const at = date.getTime();
+    return Number.isFinite(at) && open != null && high != null && low != null
+      && Number.isFinite(high) && low > 0 && low <= open && open <= high
+      ? [{ at, open, high, low }] : [];
+  }).sort((a, b) => a.at - b.at);
+}
 const times = (v: number | null, k: number) => (v === null ? null : v * k);
 
-let universe: { at: number; items: ListItem[] } | null = null;
-let universePending: Promise<ListItem[]> | null = null;
+type StockSnapshot = { at: number; items: ListItem[] };
+let universe: StockSnapshot | null = null;
+let universePending: Promise<StockSnapshot> | null = null;
 
 async function loadUniverse(force: boolean): Promise<ListItem[]> {
   const tv = await getTv(force);
@@ -40,7 +54,7 @@ async function loadUniverse(force: boolean): Promise<ListItem[]> {
       const kode = q.symbol.replace(/\.JK$/, "");
       const meta = EMITEN_BY_CODE.get(kode);
       const harga = num(q.regularMarketPrice);
-      if (!meta || harga === null) continue;
+      if (!meta || harga === null || harga <= 0) continue;
       const dps = num(q.dividendRate) ?? num(q.trailingAnnualDividendRate);
       const volume = num(q.regularMarketVolume);
       const info = tv.get(kode);
@@ -57,14 +71,6 @@ async function loadUniverse(force: boolean): Promise<ListItem[]> {
         else if (cmf <= -0.15) foreign_status = "Distribusi Masif";
         else if (cmf <= -0.04) foreign_status = "Distribusi";
         else foreign_status = "Netral";
-      } else if (nilai !== null && q.regularMarketChangePercent !== undefined && q.regularMarketChangePercent !== null) {
-        const estCmf = Math.max(-0.25, Math.min(0.25, (Number(q.regularMarketChangePercent) / 100) * 1.5));
-        foreign_flow = Math.round(nilai * estCmf);
-        if (estCmf >= 0.08) foreign_status = "Akumulasi Masif";
-        else if (estCmf >= 0.03) foreign_status = "Akumulasi";
-        else if (estCmf <= -0.08) foreign_status = "Distribusi Masif";
-        else if (estCmf <= -0.03) foreign_status = "Distribusi";
-        else foreign_status = "Netral";
       }
 
       items.push({
@@ -73,6 +79,7 @@ async function loadUniverse(force: boolean): Promise<ListItem[]> {
         papan: meta.papan,
         sektor: info?.sektor ?? null,
         harga,
+        quoteAt: q.regularMarketTime instanceof Date ? num(q.regularMarketTime.getTime()) : null,
         perubahan_pct: num(q.regularMarketChangePercent),
         mcap: num(q.marketCap),
         per: num(q.trailingPE),
@@ -108,14 +115,18 @@ export async function getUniverse(force = false): Promise<{ items: ListItem[]; u
   if (!force && universe && Date.now() - universe.at < UNIVERSE_TTL) return { items: universe.items, updatedAt: universe.at };
   universePending ??= loadUniverse(force)
     .then((items) => {
-      if (items.length) universe = { at: Date.now(), items };
-      return items;
+      if (items.length) {
+        universe = { at: Date.now(), items };
+        return universe;
+      }
+      if (universe) return universe;
+      throw new Error("Kutipan saham belum tersedia dari penyedia.");
     })
     .finally(() => {
       universePending = null;
     });
-  const items = await universePending;
-  return { items, updatedAt: universe?.at ?? Date.now() };
+  const snapshot = await universePending;
+  return { items: snapshot.items, updatedAt: snapshot.at };
 }
 
 const QUOTE_TTL = 6 * 1000; // 6 seconds for live quote updates
@@ -171,7 +182,7 @@ export async function getDetail(kode: string, force = false): Promise<Detail> {
     }
 
     // Fast quote refresh path (< 150ms)
-    if (isFundamentalFresh || force) {
+    if (isFundamentalFresh) {
       try {
         const q = await yf.quote(symbol, {}, OPTS);
         if (q && typeof q.regularMarketPrice === "number") {
@@ -187,23 +198,14 @@ export async function getDetail(kode: string, force = false): Promise<Detail> {
             if (typeof q.bidSize === "number") hit.data.kepemilikan.bid_size = q.bidSize;
             if (typeof q.askSize === "number") hit.data.kepemilikan.ask_size = q.askSize;
           }
-          if (hit.data.bandarmologi) {
-            hit.data.best_buy = computeBestBuy({
-              kode,
-              harga: hit.data.harga,
-              hari_rendah: hit.data.hari_rendah,
-              hari_tinggi: hit.data.hari_tinggi,
-              bap: hit.data.bandarmologi.brokerAvgPrice,
-              perubahan_pct: hit.data.perubahan_pct,
-              topBuyerCode: hit.data.bandarmologi.topBuyers[0]?.code,
-            });
-          }
+          hit.data.best_buy = computeBestBuy({ harga: hit.data.harga, hari_rendah: hit.data.hari_rendah });
           hit.quoteAt = now;
           return hit.data;
         }
       } catch {
-        return hit.data;
+        return { ...hit.data, quoteStale: true };
       }
+      return { ...hit.data, quoteStale: true };
     }
   }
   const [quote, s, tv, chart, searchRes] = await Promise.all([
@@ -403,23 +405,7 @@ export async function getDetail(kode: string, force = false): Promise<Detail> {
     ],
   };
 
-  const bandarmologi = computeBandarmologi(
-    kode,
-    harga,
-    base.volume,
-    base.perubahan_pct
-  );
-
-  const best_buy = computeBestBuy({
-    kode,
-    harga,
-    hari_rendah: base.hari_rendah,
-    hari_tinggi: base.hari_tinggi,
-    ma50: base.ma50,
-    bap: bandarmologi.brokerAvgPrice,
-    perubahan_pct: base.perubahan_pct,
-    topBuyerCode: bandarmologi.topBuyers[0]?.code,
-  });
+  const best_buy = computeBestBuy({ harga, hari_rendah: base.hari_rendah });
 
   const dividend_trap = computeDividendHunter({
     kode,
@@ -438,7 +424,6 @@ export async function getDetail(kode: string, force = false): Promise<Detail> {
   const data: Detail = {
     ...base,
     analisis: analyze(base),
-    bandarmologi,
     best_buy,
     dividend_trap,
   };

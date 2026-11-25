@@ -1,5 +1,6 @@
 import YahooFinance from "yahoo-finance2";
 import { fetchNewsFeed, type SourcedNews } from "./news";
+import { marketDay, MARKET_DAY_MS } from "./marketDate";
 
 const yf = new YahooFinance({ suppressNotices: ["yahooSurvey"] });
 
@@ -271,7 +272,7 @@ function buildIndicatorDetails(
 }
 
 function getUpcomingEvents(): MacroEvent[] {
-  const now = new Date();
+  const today = marketDay(Date.now());
 
   const allEvents: Omit<MacroEvent, "countdownDays">[] = [
     {
@@ -403,9 +404,7 @@ function getUpcomingEvents(): MacroEvent[] {
 
   return allEvents
     .map((e) => {
-      const eventDate = new Date(e.date);
-      const diffMs = eventDate.getTime() - now.getTime();
-      const countdownDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+      const countdownDays = (Date.parse(e.date + "T00:00:00Z") - today) / MARKET_DAY_MS;
       return { ...e, countdownDays };
     })
     .filter((e) => e.countdownDays >= -1)

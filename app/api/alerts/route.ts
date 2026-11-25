@@ -7,7 +7,7 @@ import {
   listPriceAlerts,
   togglePriceAlert,
 } from "@/lib/db";
-import { getUniverse } from "@/lib/market";
+import { getUniverse, isKnownCode } from "@/lib/market";
 
 const unauthorized = () => NextResponse.json({ error: "Belum login" }, { status: 401 });
 
@@ -17,7 +17,7 @@ export async function GET() {
 
   const alerts = await listPriceAlerts(s.user.id);
   const snapshot = alerts.length ? await getUniverse().catch(() => null) : null;
-  if (snapshot) applyAlertSnapshot(snapshot.items, snapshot.updatedAt);
+  if (snapshot) await applyAlertSnapshot(snapshot.items, snapshot.updatedAt);
   const universe = snapshot?.items ?? [];
   const priceMap = new Map(universe.map((u) => [u.kode, u]));
 
@@ -47,11 +47,11 @@ export async function POST(req: Request) {
 
   const body = await req.json().catch(() => null);
   const kode = typeof body?.kode === "string" ? body.kode.trim().toUpperCase() : "";
-  const kondisi = body?.kondisi === "DIBAWAH" ? "DIBAWAH" : "DIATAS";
+  const kondisi = body?.kondisi;
   const target_harga = Number(body?.target_harga);
   const catatan = typeof body?.catatan === "string" ? body.catatan.trim() : "";
 
-  if (!/^[A-Z0-9]{4}$/.test(kode) || !(target_harga > 0) || target_harga > 1e9) {
+  if (!isKnownCode(kode) || (kondisi !== "DIATAS" && kondisi !== "DIBAWAH") || !(target_harga > 0) || target_harga > 1e9) {
     return NextResponse.json({ error: "Data alert tidak valid" }, { status: 400 });
   }
 
@@ -71,9 +71,9 @@ export async function PATCH(req: Request) {
 
   const body = await req.json().catch(() => null);
   const id = typeof body?.id === "string" ? body.id : "";
-  const aktif = Boolean(body?.aktif);
+  const aktif = body?.aktif;
 
-  if (!id) return NextResponse.json({ error: "ID tidak valid" }, { status: 400 });
+  if (!id || typeof aktif !== "boolean") return NextResponse.json({ error: "Data alert tidak valid" }, { status: 400 });
   const ok = await togglePriceAlert(s.user.id, id, aktif);
   if (!ok) return NextResponse.json({ error: "Tidak ditemukan" }, { status: 404 });
 

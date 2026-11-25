@@ -3,6 +3,8 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { savedScreenerQuery, screenStocks } from "./screener";
+import type { OfflineFill, OfflineTrade, OfflineTradeEnd } from "./paperOffline";
+import { CRYPTO_UNITS_PER_COIN, cryptoQuantityUnits, type PortfolioMarket } from "./portfolio";
 import type { ListItem } from "./types";
 
 export type HoldingRow = { id: string; kode: string; harga_beli: number; lot: number; transactionId?: string };
@@ -73,6 +75,19 @@ const schema = `
       catatan TEXT,
       created_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS crypto_portfolio_transactions (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      kode TEXT NOT NULL,
+      tipe TEXT NOT NULL,
+      harga REAL NOT NULL,
+      lot INTEGER NOT NULL,
+      fee REAL NOT NULL DEFAULT 0,
+      tanggal TEXT NOT NULL,
+      catatan TEXT,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_crypto_tx_user ON crypto_portfolio_transactions(user_id);
     CREATE TABLE IF NOT EXISTS price_alerts (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -129,6 +144,13 @@ const schema = `
     CREATE TABLE IF NOT EXISTS alert_push_config (
       id INTEGER PRIMARY KEY CHECK (id = 1), public_key TEXT NOT NULL, private_key TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS paper_trade_watches (
+      user_id TEXT NOT NULL, trade_id TEXT NOT NULL, kode TEXT NOT NULL,
+      trade TEXT NOT NULL, registered_at INTEGER NOT NULL, last_checked INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'OPEN', end_at INTEGER, fill TEXT,
+      PRIMARY KEY (user_id, trade_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_paper_trade_watches_pending ON paper_trade_watches(status, kode, last_checked);
     `;
 
 type LocalDatabase = { mode: "sqlite"; connection: DatabaseSync; tail: Promise<void> };
@@ -229,6 +251,66 @@ function queueLocal<T>(state: LocalDatabase, work: () => T | Promise<T>): Promis
 async function db(): Promise<SqlStore> {
   const state = await databaseState();
   return state.mode === "turso" ? remoteStore(state.client) : localStore(state.connection, (work) => queueLocal(state, work));
+}
+
+export async function syncOfflineTrades(userId: string, trades: OfflineTrade[], ended: OfflineTradeEnd[], now: number) {
+  const ids = [...trades, ...ended].map(({ id }) => id);
+  if (!ids.length) return { fills: [], settledIds: [] };
+
+  return writeTransaction(async (store) => {
+    const register = store.prepare(`INSERT INTO paper_trade_watches (user_id, trade_id, kode, trade, registered_at)
+      VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id, trade_id) DO NOTHING`);
+    for (const trade of trades) await register.run(userId, trade.id, trade.kode, JSON.stringify(trade), now);
+
+    const finish = store.prepare(`UPDATE paper_trade_watches
+      SET status = CASE WHEN ? IS NULL THEN 'CANCELLED' ELSE status END,
+          end_at = MIN(COALESCE(end_at, ?), ?)
+      WHERE user_id = ? AND trade_id = ? AND status = 'OPEN'`);
+    for (const { id, at } of ended) await finish.run(at, at, at, userId, id);
+
+    const rows = await store.prepare(`SELECT trade_id, status, fill FROM paper_trade_watches
+      WHERE user_id = ? AND trade_id IN (${ids.map(() => "?").join(", ")})`).all(userId, ...ids);
+    const pending = new Set(rows.filter((row) => row.status === "OPEN").map((row) => row.trade_id));
+    return {
+      fills: rows.flatMap((row) => typeof row.fill === "string" ? [JSON.parse(row.fill) as OfflineFill] : []),
+      settledIds: ids.filter((id) => !pending.has(id)),
+    };
+  });
+}
+
+export async function listOfflineWatchCodes(limit: number, after: number) {
+  const store = await db();
+  const rows = await store.prepare(`SELECT kode FROM paper_trade_watches
+    WHERE status = 'OPEN' AND last_checked < ? GROUP BY kode ORDER BY MIN(last_checked), kode LIMIT ?`).all(after, limit);
+  return rows.map((row) => String(row.kode));
+}
+
+export async function listOfflineWatches(kode: string) {
+  const store = await db();
+  const rows = await store.prepare(`SELECT user_id, trade, registered_at, end_at FROM paper_trade_watches
+    WHERE status = 'OPEN' AND kode = ?`).all(kode);
+  return rows.map((row) => ({
+    userId: String(row.user_id), trade: JSON.parse(String(row.trade)) as OfflineTrade,
+    registeredAt: Number(row.registered_at), endAt: row.end_at === null ? null : Number(row.end_at),
+  }));
+}
+
+export async function saveOfflineWatchResults(
+  kode: string, now: number,
+  results: { userId: string; id: string; fill: OfflineFill | null; endAt: number | null }[],
+) {
+  await writeTransaction(async (store) => {
+    const markFilled = store.prepare(`UPDATE paper_trade_watches SET status = 'FILLED', fill = ?
+      WHERE user_id = ? AND trade_id = ? AND status = 'OPEN' AND (end_at IS NULL OR end_at >= ?)`);
+    const markFinished = store.prepare(`UPDATE paper_trade_watches SET status = 'CANCELLED'
+      WHERE user_id = ? AND trade_id = ? AND status = 'OPEN' AND end_at = ?`);
+    for (const { userId, id, fill, endAt } of results) {
+      if (fill) await markFilled.run(JSON.stringify(fill), userId, id, fill.exitAt);
+      else if (endAt !== null) await markFinished.run(userId, id, endAt);
+    }
+    await store.prepare(`UPDATE paper_trade_watches SET last_checked = MAX(last_checked, ?)
+      WHERE kode = ? AND status = 'OPEN' AND registered_at <= ?`).run(now, kode, now);
+  });
 }
 
 async function writeTransaction<T>(write: (store: SqlStore) => Promise<T>): Promise<T> {
@@ -332,14 +414,37 @@ export async function deleteFilter(userId: string, id: string) {
 
 export class PortfolioPositionError extends Error {}
 
-export async function listHoldings(userId: string, store?: SqlStore): Promise<HoldingRow[]> {
-  store ??= await db();
+function tradeTable(market: PortfolioMarket) {
+  return market === "crypto" ? "crypto_portfolio_transactions" : "portfolio_transactions";
+}
+
+function tradeLedger(market: PortfolioMarket) {
+  return market === "crypto" ? "SELECT t.*, 1 AS linked FROM crypto_portfolio_transactions t"
+    : "SELECT t.*, a.transaction_id IS NOT NULL AS linked FROM portfolio_transactions t " +
+      "LEFT JOIN portfolio_position_entries a ON t.id = a.transaction_id";
+}
+
+function storedQuantity(quantity: number, market: PortfolioMarket) {
+  if (market === "stock") return quantity;
+  const units = cryptoQuantityUnits(quantity);
+  if (units === null) throw new PortfolioPositionError("Jumlah koin tidak valid. Gunakan maksimal 8 angka desimal.");
+  return units;
+}
+
+export async function listHoldings(userId: string, store?: SqlStore, market: PortfolioMarket = "stock"): Promise<HoldingRow[]> {
+  const positions = await replayHoldings(userId, store ?? await db(), market);
+  return market === "crypto" ? positions.map((position) => ({ ...position, lot: position.lot / CRYPTO_UNITS_PER_COIN })) : positions;
+}
+
+async function replayHoldings(userId: string, store: SqlStore, market: PortfolioMarket) {
   // Opening positions predate the linked journal. Legacy journal-only entries do not replay.
-  const events = await store.prepare(
-    "SELECT id, kode, harga_beli, lot, 'BELI' AS tipe, 0 AS linked, '' AS tanggal, rowid AS sequence FROM holdings WHERE user_id = ? " +
+  const equityEvents = "SELECT id, kode, harga_beli, lot, 'BELI' AS tipe, 0 AS linked, '' AS tanggal, rowid AS sequence FROM holdings WHERE user_id = ? " +
     "UNION ALL SELECT t.id, t.kode, t.harga, t.lot, t.tipe, 1, t.tanggal, a.sequence FROM portfolio_transactions t " +
-    "JOIN portfolio_position_entries a ON a.transaction_id = t.id WHERE t.user_id = ? ORDER BY linked, tanggal, sequence"
-  ).all(userId, userId) as unknown as (HoldingRow & { tipe: "BELI" | "JUAL"; linked: 0 | 1; tanggal: string })[];
+    "JOIN portfolio_position_entries a ON a.transaction_id = t.id WHERE t.user_id = ? ORDER BY linked, tanggal, sequence";
+  const events = (market === "crypto" ? await store.prepare(
+    "SELECT id, kode, harga AS harga_beli, lot, tipe, 1 AS linked, tanggal FROM crypto_portfolio_transactions WHERE user_id = ? ORDER BY tanggal, rowid"
+  ).all(userId) : await store.prepare(equityEvents).all(userId, userId)) as unknown as (HoldingRow & { tipe: "BELI" | "JUAL"; linked: 0 | 1; tanggal: string })[];
+  const tolerance = market === "crypto" ? 0 : 1e-8;
 
   const byTicker = new Map<string, HoldingRow[]>();
   const positions: HoldingRow[] = [];
@@ -361,13 +466,14 @@ export async function listHoldings(userId: string, store?: SqlStore): Promise<Ho
       const used = Math.min(position.lot, remaining);
       position.lot -= used;
       remaining -= used;
-      if (remaining <= 1e-8) break;
+      if (remaining <= tolerance) break;
     }
-    if (remaining > 1e-8) {
-      throw new PortfolioPositionError("Lot " + event.kode + " tidak cukup untuk transaksi jual pada tanggal " + event.tanggal + ".");
+    if (remaining > tolerance) {
+      const unit = market === "crypto" ? "Jumlah koin" : "Lot";
+      throw new PortfolioPositionError(`${unit} ${event.kode} tidak cukup untuk transaksi jual pada tanggal ${event.tanggal}.`);
     }
   }
-  return positions.filter((position) => position.lot > 1e-8);
+  return positions.filter((position) => position.lot > tolerance);
 }
 
 export function addHoldings(userId: string, holdings: Omit<HoldingRow, "id">[]) {
@@ -383,15 +489,32 @@ export function addHoldings(userId: string, holdings: Omit<HoldingRow, "id">[]) 
   });
 }
 
-export function updateHolding(userId: string, id: string, h: { harga_beli: number; lot: number }) {
+export function updateHolding(userId: string, id: string, h: {
+  harga_beli: number; lot: number; expected?: Pick<HoldingRow, "harga_beli" | "lot">;
+}, market: PortfolioMarket = "stock") {
   return writeTransaction(async (store) => {
-    const opening = await store.prepare("SELECT lot FROM holdings WHERE id = ? AND user_id = ?").get(id, userId);
-    if (!opening) return false;
-    const remaining = (await listHoldings(userId, store)).find((position) => position.id === id)?.lot ?? 0;
-    const changed = (await store.prepare("UPDATE holdings SET harga_beli = ?, lot = ? WHERE id = ? AND user_id = ?")
-      .run(h.harga_beli, h.lot + Number(opening.lot) - remaining, id, userId)).changes > 0;
-    if (changed) await listHoldings(userId, store);
-    return changed;
+    const opening = market === "stock" ? await store.prepare("SELECT lot FROM holdings WHERE id = ? AND user_id = ?").get(id, userId) : undefined;
+    const eligibleBuy = market === "crypto" ? "SELECT t.lot FROM crypto_portfolio_transactions t" :
+      "SELECT t.lot FROM portfolio_transactions t JOIN portfolio_position_entries a ON a.transaction_id = t.id";
+    const buy = opening ? undefined : await store.prepare(`${eligibleBuy} WHERE t.id = ? AND t.user_id = ? AND t.tipe = 'BELI'`).get(id, userId);
+    const entry = opening ?? buy;
+    if (!entry) return false;
+
+    const current = (await replayHoldings(userId, store, market)).find((position) => position.id === id);
+    const tolerance = market === "crypto" ? 0 : 1e-8;
+    if (h.expected && (!current || Math.abs(current.lot - storedQuantity(h.expected.lot, market)) > tolerance || current.harga_beli !== h.expected.harga_beli)) {
+      throw new PortfolioPositionError("Posisi sudah berubah. Tutup formulir lalu buka Edit lagi untuk melihat data terbaru.");
+    }
+    if (buy && !current) return false;
+
+    // Edits specify the lot still held. Keep the quantity already consumed by earlier sales.
+    const totalLot = storedQuantity(h.lot, market) + (Number(entry.lot) - (current?.lot ?? 0));
+    if (market === "crypto" && !Number.isSafeInteger(totalLot)) throw new PortfolioPositionError("Jumlah koin melebihi batas pencatatan.");
+    const update = opening ? "UPDATE holdings SET harga_beli = ?, lot = ? WHERE id = ? AND user_id = ?"
+      : `UPDATE ${tradeTable(market)} SET harga = ?, lot = ? WHERE id = ? AND user_id = ? AND tipe = 'BELI'`;
+    await store.prepare(update).run(h.harga_beli, totalLot, id, userId);
+    await listHoldings(userId, store, market);
+    return true;
   });
 }
 
@@ -409,12 +532,11 @@ export function deleteHolding(userId: string, id: string) {
   });
 }
 
-export async function listTransactions(userId: string) {
+export async function listTransactions(userId: string, market: PortfolioMarket = "stock") {
   const store = await db();
-  return await store.prepare(
-    "SELECT t.*, a.transaction_id IS NOT NULL AS linked FROM portfolio_transactions t LEFT JOIN portfolio_position_entries a " +
-    "ON t.id = a.transaction_id WHERE t.user_id = ? ORDER BY t.tanggal DESC, t.created_at DESC, t.rowid DESC"
-  ).all(userId) as unknown as TransactionRow[];
+  const rows = await store.prepare(`${tradeLedger(market)} WHERE t.user_id = ? ORDER BY t.tanggal DESC, t.created_at DESC, t.rowid DESC`)
+    .all(userId) as unknown as TransactionRow[];
+  return market === "crypto" ? rows.map((row) => ({ ...row, lot: row.lot / CRYPTO_UNITS_PER_COIN })) : rows;
 }
 
 export function addTransaction(
@@ -422,39 +544,41 @@ export function addTransaction(
   tx: Omit<TransactionRow, "id" | "user_id" | "created_at" | "linked">,
   applyToHoldings = false,
   requestId?: string,
+  market: PortfolioMarket = "stock",
 ) {
   return writeTransaction(async (store) => {
     const id = requestId ?? crypto.randomUUID();
-    const existing = await store.prepare(
-      "SELECT t.*, a.transaction_id IS NOT NULL AS linked FROM portfolio_transactions t LEFT JOIN portfolio_position_entries a " +
-      "ON t.id = a.transaction_id WHERE t.id = ? AND t.user_id = ?"
-    ).get(id, userId) as unknown as TransactionRow | undefined;
+    const linked = market === "crypto" || applyToHoldings;
+    const lot = storedQuantity(tx.lot, market);
+    const existing = await store.prepare(`${tradeLedger(market)} WHERE t.id = ? AND t.user_id = ?`).get(id, userId) as unknown as TransactionRow | undefined;
     if (existing) {
       if (existing.kode !== tx.kode || existing.tipe !== tx.tipe || existing.harga !== tx.harga ||
-          existing.lot !== tx.lot || existing.fee !== tx.fee || existing.catatan !== tx.catatan ||
-          existing.tanggal !== tx.tanggal || Boolean(existing.linked) !== applyToHoldings) {
+          existing.lot !== lot || existing.fee !== tx.fee || existing.catatan !== tx.catatan ||
+          existing.tanggal !== tx.tanggal || Boolean(existing.linked) !== linked) {
         throw new PortfolioPositionError("ID transaksi ini sudah dipakai untuk data yang berbeda.");
       }
-      return existing;
+      return { ...existing, lot: tx.lot };
     }
 
     const created_at = Date.now();
     await store.prepare(
-      "INSERT INTO portfolio_transactions (id, user_id, kode, tipe, harga, lot, fee, tanggal, catatan, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    ).run(id, userId, tx.kode, tx.tipe, tx.harga, tx.lot, tx.fee, tx.tanggal, tx.catatan, created_at);
-    if (applyToHoldings) {
+      `INSERT INTO ${tradeTable(market)} (id, user_id, kode, tipe, harga, lot, fee, tanggal, catatan, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(id, userId, tx.kode, tx.tipe, tx.harga, lot, tx.fee, tx.tanggal, tx.catatan, created_at);
+    if (linked && market === "stock") {
       await store.prepare("INSERT INTO portfolio_position_entries (transaction_id) VALUES (?)").run(id);
-      await listHoldings(userId, store);
     }
-    return { id, user_id: userId, ...tx, created_at, linked: Number(applyToHoldings) } satisfies TransactionRow;
+    if (linked) await listHoldings(userId, store, market);
+    return { id, user_id: userId, ...tx, created_at, linked: Number(linked) } satisfies TransactionRow;
   });
 }
 
-export function deleteTransaction(userId: string, id: string) {
+export function deleteTransaction(userId: string, id: string, market: PortfolioMarket = "stock") {
   return writeTransaction(async (store) => {
-    await store.prepare("DELETE FROM portfolio_position_entries WHERE transaction_id IN (SELECT id FROM portfolio_transactions WHERE id = ? AND user_id = ?)").run(id, userId);
-    const changed = (await store.prepare("DELETE FROM portfolio_transactions WHERE id = ? AND user_id = ?").run(id, userId)).changes > 0;
-    if (changed) await listHoldings(userId, store);
+    if (market === "stock") {
+      await store.prepare("DELETE FROM portfolio_position_entries WHERE transaction_id IN (SELECT id FROM portfolio_transactions WHERE id = ? AND user_id = ?)").run(id, userId);
+    }
+    const changed = (await store.prepare(`DELETE FROM ${tradeTable(market)} WHERE id = ? AND user_id = ?`).run(id, userId)).changes > 0;
+    if (changed) await listHoldings(userId, store, market);
     return changed;
   });
 }
@@ -508,6 +632,14 @@ export async function listAlertEvents(userId: string) {
   const unread = await store.prepare("SELECT count(*) AS count FROM alert_events WHERE user_id = ? AND read_at IS NULL")
     .get(userId);
   return { events, unreadCount: Number(unread?.count ?? 0) };
+}
+
+export async function listWatchlistAlertEvents(userId: string, since: number) {
+  const store = await db();
+  return await store.prepare(`SELECT e.id, e.kind, e.label, e.kode, e.harga, e.query, e.created_at, e.read_at
+    FROM alert_events e JOIN watchlist w ON w.user_id = e.user_id AND w.kode = e.kode
+    WHERE e.user_id = ? AND e.created_at >= ?
+    ORDER BY e.created_at DESC, e.rowid DESC LIMIT 12`).all(userId, since) as unknown as AlertEvent[];
 }
 
 export async function markAlertEventsRead(userId: string) {

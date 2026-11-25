@@ -23,88 +23,55 @@ export function getTickSize(price: number): number {
   return 1;
 }
 
-export function computeBestBuy(params: {
-  kode: string;
+export function projectSwingPrices(reference: number | null) {
+  if (reference === null || !Number.isFinite(reference) || reference <= 1) return null;
+  return {
+    tp1: roundToTick(reference * 1.015, "ceil"),
+    tp2: roundToTick(reference * 1.03, "ceil"),
+    downside: roundToTick(reference * 0.98, "floor"),
+  };
+}
+
+export function computeBestBuy({ harga, hari_rendah }: {
   harga: number | null;
-  hari_rendah?: number | null;
-  hari_tinggi?: number | null;
-  ma50?: number | null;
-  bap?: number | null;
-  perubahan_pct?: number | null;
-  topBuyerCode?: string;
-}): BestBuyData {
-  const { kode, harga, hari_rendah, bap, perubahan_pct, topBuyerCode } = params;
-  const currentPrice = harga && harga > 0 ? harga : 1000;
-  const tick = getTickSize(currentPrice);
+  hari_rendah: number | null;
+}): BestBuyData | undefined {
+  if (harga === null || !Number.isFinite(harga) || harga <= 1) return undefined;
+  const dayLow = hari_rendah !== null && hari_rendah > 0 && hari_rendah <= harga ? hari_rendah : null;
+  const tick = getTickSize(harga);
+  const entryLow = roundToTick(Math.min(harga * 0.992, dayLow ?? harga * 0.99), "floor");
+  const entryHigh = roundToTick(Math.max(entryLow + tick, Math.min(harga, entryLow + 2 * tick)), "ceil");
+  const levels = projectSwingPrices(entryHigh);
+  if (!levels) return undefined;
+  const { tp1: tp1Price, tp2: tp2Price, downside: slPrice } = levels;
+  const changeFromEntry = (price: number) => (price / entryHigh - 1) * 100;
+  const riskRewardRatio = `1 : ${num((tp2Price - entryHigh) / (entryHigh - slPrice), 2)}`;
 
-  // 1. Determine Support Benchmark
-  // Support is guided by: Day Low, Broker Average Price (BAP), or dynamic support at -1.0%
-  const candidateLow = hari_rendah && hari_rendah > 0 ? hari_rendah : currentPrice * 0.99;
-  const candidateBap = bap && bap > 0 ? bap : currentPrice * 0.995;
-
-  // Best buy floor is typically placed near the candidate support level
-  const baselineSupport = Math.min(currentPrice, Math.max(candidateLow, candidateBap - tick));
-  const entryLow = roundToTick(Math.min(currentPrice * 0.992, baselineSupport), "floor");
-  const entryHigh = roundToTick(Math.max(entryLow + tick, Math.min(currentPrice, entryLow + 2 * tick)), "ceil");
-
-  // 2. Targets & Risk Limits (Strict disciplined Swing: TP1 +1.5%, TP2 +3.0%, SL -2.0%)
-  const tp1Price = roundToTick(entryHigh * 1.015, "ceil");
-  const tp1Pct = Number((((tp1Price - entryHigh) / entryHigh) * 100).toFixed(1));
-
-  const tp2Price = roundToTick(entryHigh * 1.030, "ceil");
-  const tp2Pct = Number((((tp2Price - entryHigh) / entryHigh) * 100).toFixed(1));
-
-  const slPrice = roundToTick(entryLow * 0.980, "floor");
-  const slPct = Number((((slPrice - entryLow) / entryLow) * 100).toFixed(1));
-
-  // 3. Status Evaluator
   let status: BestBuyData["status"] = "SIAP_ANTRE";
-  let statusLabel = "SIAP ANTRE (Best Buy Zone)";
-  let statusDesc = "Harga live saat ini berada tepat di rentang antrean terbaik dekat support & BAP bandar.";
-  let statusBadge = "border-[#22C55E]/40 bg-[#22C55E]/10 text-[#22C55E]";
-
-  if (currentPrice > entryHigh && currentPrice <= tp1Price * 0.99) {
-    status = "WAIT_PULLBACK";
-    statusLabel = "TUNGGU PULLBACK (Jangan Buru-Buru)";
-    statusDesc = "Harga sudah naik di atas area antre. Disarankan menunggu koreksi wajar ke area support.";
-    statusBadge = "border-amber-400/40 bg-amber-400/10 text-amber-500";
-  } else if (currentPrice > tp1Price * 0.99) {
+  let statusLabel = "Dalam rentang entry";
+  let statusDesc = "Harga berada dalam rentang entry skenario.";
+  let statusBadge = "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
+  if (harga >= tp1Price) {
     status = "OVERBOUGHT";
-    statusLabel = "JANGAN KEJAR (Mendekati TP 1 / Resisten)";
-    statusDesc = "Harga sudah mendekati target take profit. Risiko beli di harga ini tidak seimbang (High Risk).";
-    statusBadge = "border-[#FB6767]/40 bg-[#FB6767]/10 text-[#FB6767]";
-  } else if (currentPrice < entryLow) {
-    status = "WAIT_CONFIRM";
-    statusLabel = "DI BAWAH SUPPORT (Tunggu Konfirmasi Rebound)";
-    statusDesc = "Harga berada di bawah level support. Tunggu ada candle hijau pembalikan arah sebelum entry.";
-    statusBadge = "border-zinc-400/40 bg-zinc-400/10 text-zinc-500";
+    statusLabel = "Sudah mencapai target pertama";
+    statusDesc = "Harga telah mencapai target pertama dari skenario entry ini.";
+    statusBadge = "border-rose-500/40 bg-rose-500/10 text-rose-700 dark:text-rose-300";
+  } else if (harga > entryHigh) {
+    status = "WAIT_PULLBACK";
+    statusLabel = "Di atas rentang entry";
+    statusDesc = "Harga masih di atas rentang entry skenario.";
+    statusBadge = "border-amber-400/40 bg-amber-400/10 text-amber-800 dark:text-amber-300";
   }
 
-  // 4. Three Pillars of Rationale
-  const buyerRef = topBuyerCode ? `broker institusi ${topBuyerCode}` : "smart money";
-  const bapText = bap ? ` (BAP: ${rp(bap)})` : "";
-
-  const rationale = [
-    `Area Antre: ${rp(entryLow)} - ${rp(entryHigh)} berada tepat di atas bantalan support dinamis dan fraksi tick BEI.`,
-    `Konfirmasi Akumulasi: Sejajar dengan estimasi harga modal rata-rata ${buyerRef}${bapText}.`,
-    `Rasio Risk : Reward terukur 1 : 2.0 (Batas risiko cut loss ${slPct}% di ${rp(slPrice)} vs potensi profit TP2 +${tp2Pct}% di ${rp(tp2Price)}).`,
-  ];
-
   return {
-    entryLow,
-    entryHigh,
-    tp1Price,
-    tp1Pct,
-    tp2Price,
-    tp2Pct,
-    slPrice,
-    slPct,
-    riskRewardRatio: "1 : 2.0",
-    status,
-    statusLabel,
-    statusDesc,
-    statusBadge,
-    rationale,
+    entryLow, entryHigh, tp1Price, tp1Pct: changeFromEntry(tp1Price),
+    tp2Price, tp2Pct: changeFromEntry(tp2Price), slPrice, slPct: changeFromEntry(slPrice),
+    riskRewardRatio, status, statusLabel, statusDesc, statusBadge,
+    rationale: [
+      `Rentang skenario ${rp(entryLow)} sampai ${rp(entryHigh)} mengikuti fraksi harga.`,
+      dayLow !== null ? `Harga terendah sesi yang dilaporkan ${rp(dayLow)}.` : "Skenario memakai harga terakhir sebagai acuan.",
+      `Perbandingan risiko terhadap target kedua ${riskRewardRatio} sebelum biaya.`,
+    ],
   };
 }
 

@@ -11,12 +11,11 @@ import { TechnicalSignals } from "./TechnicalSignals";
 import { StockNewsCorporate } from "./StockNewsCorporate";
 import { Financials } from "./Financials";
 import { Calculator } from "./Calculator";
-import { PriceFlash, LiveBadge } from "./PriceFlash";
+import { PriceFlash } from "./PriceFlash";
 import { BestBuyCard } from "./BestBuyCard";
-import { BandarmologiCard } from "./BandarmologiCard";
 import { DividendHunterCard } from "./DividendHunterCard";
 import { TradingViewChart } from "./TradingViewChart";
-import { MarketDepthOrderBook } from "./MarketDepthOrderBook";
+import { StockActivity } from "./StockActivity";
 
 const x = (v: number | null, unit = "") => (v === null ? "-" : `${num(v, 2)}${unit}`);
 const compactNum = (v: number | null) => (v === null ? "-" : num(v, 0));
@@ -53,60 +52,49 @@ function BarChart({ data, format }: { data: { label: string; value: number | nul
 
 export function StockDetail({ kode }: { kode: string }) {
   const [state, setState] = useState<{ data?: Detail; error?: string }>({});
+  const [attempt, setAttempt] = useState(0);
   const [alertOpen, setAlertOpen] = useState(false);
   const [alertTarget, setAlertTarget] = useState("");
   const [alertCondition, setAlertCondition] = useState<"DIATAS" | "DIBAWAH">("DIATAS");
   const [alertNote, setAlertNote] = useState("");
   const [alertStatus, setAlertStatus] = useState("");
+  const [savingAlert, setSavingAlert] = useState(false);
 
   useEffect(() => {
-    fetch(`/api/saham/${kode}`)
-      .then(async (r) => {
-        const j = await r.json();
-        if (!r.ok) throw new Error(j.error ?? "Gagal mengambil data");
-        setState({ data: j });
-        if (j.harga) setAlertTarget(String(Math.round(j.harga * 1.05)));
-      })
-      .catch((e: unknown) => setState({ error: e instanceof Error ? e.message : String(e) }));
-  }, [kode]);
-
-  // Seamless Background Auto-Refresh (every 12 seconds) - Live quote stream
-  useEffect(() => {
-    if (!kode) return;
-    const interval = setInterval(() => {
-      if (document.hidden) return;
-      fetch(`/api/saham/${kode}?refresh=1`)
-        .then((r) => (r.ok ? r.json() : null))
-        .then((j: Detail | null) => {
-          if (j?.kode) {
-            setState((prev) =>
-              prev.data
-                ? {
-                  data: {
-                    ...prev.data,
-                    harga: j.harga,
-                    perubahan: j.perubahan,
-                    perubahan_pct: j.perubahan_pct,
-                    volume: j.volume,
-                    hari_tinggi: j.hari_tinggi,
-                    hari_rendah: j.hari_rendah,
-                    kepemilikan: j.kepemilikan || prev.data.kepemilikan,
-                    best_buy: j.best_buy || prev.data.best_buy,
-                  },
-                }
-                : { data: j }
-            );
-          }
-        })
-        .catch(() => { });
-    }, 12000);
-    return () => clearInterval(interval);
-  }, [kode]);
+    const controller = new AbortController();
+    let pending = false;
+    async function load(refresh = false) {
+      if (pending) return;
+      pending = true;
+      try {
+        const response = await fetch(`/api/saham/${encodeURIComponent(kode)}${refresh ? "?refresh=1" : ""}`, { signal: controller.signal });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error ?? "Gagal mengambil data.");
+        if (controller.signal.aborted) return;
+        setState({ data });
+        if (data.harga) setAlertTarget((previous) => previous || String(Math.round(data.harga * 1.05)));
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          setState((previous) => ({ ...previous, error: error instanceof Error ? error.message : "Gagal mengambil data." }));
+        }
+      } finally {
+        pending = false;
+      }
+    }
+    void load();
+    const timer = window.setInterval(() => { if (!document.hidden) void load(true); }, 12_000);
+    return () => {
+      window.clearInterval(timer);
+      controller.abort();
+    };
+  }, [kode, attempt]);
 
   async function saveAlert(e: React.FormEvent) {
     e.preventDefault();
+    if (savingAlert) return;
     const t = Number(alertTarget);
     if (!t || t <= 0) return setAlertStatus("Target harga tidak valid");
+    setSavingAlert(true);
     try {
       const res = await fetch("/api/alerts", {
         method: "POST",
@@ -130,6 +118,8 @@ export function StockDetail({ kode }: { kode: string }) {
       }
     } catch {
       setAlertStatus("Gagal menyimpan alert");
+    } finally {
+      setSavingAlert(false);
     }
   }
 
@@ -154,7 +144,11 @@ export function StockDetail({ kode }: { kode: string }) {
     return (
       <main className="screen-shell space-y-6 py-12">
         {back}
-        <Card className="p-8 text-center text-sm text-red-600 dark:text-red-400">Gagal memuat {kode}: {state.error}</Card>
+        <Card className="space-y-3 p-8 text-center text-sm">
+          <p role="alert" className="text-red-700 dark:text-red-300">Gagal memuat {kode}. {state.error}</p>
+          <button type="button" onClick={() => { setState({}); setAttempt((value) => value + 1); }}
+            className="control-button ios-glass-pill rounded-xl font-semibold">Coba lagi</button>
+        </Card>
       </main>
     );
   }
@@ -190,6 +184,9 @@ export function StockDetail({ kode }: { kode: string }) {
                 >
                   Bandingkan
                 </Link>
+                <a href="#aktivitas-saham" className="control-button ios-glass-pill rounded-full py-1 text-xs font-medium">
+                  Bandarmology &amp; Insider
+                </a>
                 <button
                   onClick={() => setAlertOpen(!alertOpen)}
                   className="control-button rounded-full border border-amber-300 bg-amber-50 py-1 text-xs font-semibold text-amber-900 transition hover:bg-amber-100 dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-300"
@@ -218,7 +215,9 @@ export function StockDetail({ kode }: { kode: string }) {
               <span className="rounded-full border border-emerald-500/20 bg-emerald-50/70 px-2 py-0.5 text-[10px] font-bold text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-950/40 dark:text-emerald-300">
                 🟢 Bursa BEI (IDX)
               </span>
-              <LiveBadge label="Live 4s" />
+              <span className="text-xs text-zinc-600 dark:text-zinc-400">
+                {state.error || d.quoteStale ? "Kutipan tersimpan" : "Kutipan Yahoo Finance"}
+              </span>
             </div>
             <div>
               <PriceFlash value={d.harga} type="hero">
@@ -231,52 +230,6 @@ export function StockDetail({ kode }: { kode: string }) {
               {d.perubahan_pct === null ? "-" : `${up ? "▲" : "▼"} ${num(Math.abs(d.perubahan ?? 0), 0)} (${num(Math.abs(d.perubahan_pct), 2)}%)`}
             </div>
 
-            {/* Quick Live Tick Simulator for Instant User Verification */}
-            <div className="mt-2.5 flex items-center justify-end gap-1.5 text-[10px]">
-              <span className="text-zinc-400 dark:text-zinc-500 font-medium">⚡ Uji Flashing:</span>
-              <button
-                type="button"
-                onClick={() => {
-                  setState((prev) =>
-                    prev.data
-                      ? {
-                        ...prev,
-                        data: {
-                          ...prev.data,
-                          harga: Math.round((prev.data.harga ?? 1000) * 1.005),
-                          perubahan_pct: Number(((prev.data.perubahan_pct ?? 0) + 0.5).toFixed(2)),
-                        },
-                      }
-                      : prev
-                  );
-                }}
-                className="rounded-md border border-emerald-300/80 bg-emerald-50/80 px-2 py-0.5 font-bold text-emerald-700 hover:bg-emerald-100 transition dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300"
-                title="Simulasi harga naik +0.5% untuk menguji animasi flash hijau"
-              >
-                +0.5% (Hijau)
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setState((prev) =>
-                    prev.data
-                      ? {
-                        ...prev,
-                        data: {
-                          ...prev.data,
-                          harga: Math.round((prev.data.harga ?? 1000) * 0.995),
-                          perubahan_pct: Number(((prev.data.perubahan_pct ?? 0) - 0.5).toFixed(2)),
-                        },
-                      }
-                      : prev
-                  );
-                }}
-                className="rounded-md border border-rose-300/80 bg-rose-50/80 px-2 py-0.5 font-bold text-rose-700 hover:bg-rose-100 transition dark:border-rose-800 dark:bg-rose-950/60 dark:text-rose-300"
-                title="Simulasi harga turun -0.5% untuk menguji animasi flash merah"
-              >
-                -0.5% (Merah)
-              </button>
-            </div>
           </div>
         </div>
 
@@ -342,9 +295,10 @@ export function StockDetail({ kode }: { kode: string }) {
               )}
               <button
                 type="submit"
+                disabled={savingAlert}
                 className="ml-auto rounded-xl bg-green-600 px-5 py-2.5 text-xs font-bold text-white shadow-xs hover:bg-green-700"
               >
-                Simpan Alert
+                {savingAlert ? "Menyimpan…" : "Simpan Alert"}
               </button>
             </div>
           </form>
@@ -461,21 +415,6 @@ export function StockDetail({ kode }: { kode: string }) {
         )}
       </div>
 
-      {/* ── 2. Market Depth & Order Book (Bid-Offer Dome) ── */}
-      <MarketDepthOrderBook
-        kode={d.kode}
-        harga={d.harga}
-        volume={d.volume}
-        buka={d.buka}
-        tertinggi={d.hari_tinggi}
-        terendah={d.hari_rendah}
-        tutup_kemarin={d.tutup_kemarin}
-        onSelectPrice={(p) => {
-          setAlertTarget(String(p));
-          setAlertOpen(true);
-        }}
-      />
-
       {/* ── Premier Best Buy & Strategic Entry Guide (Harga Tepat Masuk) ── */}
       <BestBuyCard
         kode={d.kode}
@@ -487,13 +426,6 @@ export function StockDetail({ kode }: { kode: string }) {
           setAlertCondition("DIBAWAH");
           setAlertOpen(true);
         }}
-      />
-
-      {/* ── Bandarmologi & Broker Flow Matrix (Fitur 1) ── */}
-      <BandarmologiCard
-        kode={d.kode}
-        harga={d.harga}
-        bandarmologi={d.bandarmologi}
       />
 
       {/* Fundamental Score & Verdict */}
@@ -661,6 +593,8 @@ export function StockDetail({ kode }: { kode: string }) {
       {/* Laporan Keuangan */}
       <Financials kode={d.kode} />
 
+      <StockActivity key={d.kode} kode={d.kode} insiderPct={d.kepemilikan.insider_pct} />
+
       {/* Kepemilikan & Orderbook */}
       <div className="grid gap-6 lg:grid-cols-2">
         <Card className="p-6 sm:p-7">
@@ -690,20 +624,18 @@ export function StockDetail({ kode }: { kode: string }) {
         </Card>
 
         <Card className="p-6 sm:p-7">
-          <h2 className="mb-1 text-lg font-bold text-zinc-950 dark:text-zinc-100">Orderbook &amp; Referensi Broker</h2>
+          <h2 className="mb-1 text-lg font-bold text-zinc-950 dark:text-zinc-100">Bid dan Offer Terbaik</h2>
           <p className="mb-4 text-xs text-zinc-500 dark:text-zinc-400">
-            Penawaran terbaik (best bid/offer).
+            Harga penawaran terbaik dari Yahoo Finance, jika tersedia.
           </p>
           <div className="grid grid-cols-2 gap-4 text-center">
             <div className="rounded-2xl border border-emerald-100 bg-emerald-50/60 p-4 dark:border-emerald-900/30 dark:bg-emerald-950/20">
               <div className="text-xs font-bold uppercase tracking-wider text-emerald-700 dark:text-emerald-400">Best Bid (Beli)</div>
               <div className="mt-1 text-2xl font-extrabold text-emerald-800 dark:text-emerald-300">{d.kepemilikan.bid ? rp(d.kepemilikan.bid) : "-"}</div>
-              <div className="mt-1 text-xs text-emerald-600/80 dark:text-emerald-400/80">Antrean: {compactNum(d.kepemilikan.bid_size)} lot</div>
             </div>
             <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-800/40">
               <div className="text-xs font-bold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">Best Offer (Jual)</div>
               <div className="mt-1 text-2xl font-extrabold text-zinc-800 dark:text-zinc-200">{d.kepemilikan.ask ? rp(d.kepemilikan.ask) : "-"}</div>
-              <div className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">Antrean: {compactNum(d.kepemilikan.ask_size)} lot</div>
             </div>
           </div>
           <p className="mt-5 text-xs text-zinc-500 dark:text-zinc-400 leading-relaxed">

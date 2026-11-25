@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
+import { useComparisonData } from "./useComparisonData";
 import { useEffect, useMemo, useState } from "react";
 import type { CryptoDetailData, CryptoItem } from "@/lib/types";
 import { Card } from "./ui";
@@ -24,20 +25,12 @@ export function CryptoCompare() {
 
   // Selected coin symbols from URL query (default to BTC & ETH)
   const queryCoins = searchParams.get("coins");
-  const initialSymbols = useMemo(() => {
-    if (queryCoins) {
-      return queryCoins
-        .split(",")
-        .map((s) => s.trim().toUpperCase())
-        .filter(Boolean)
-        .slice(0, MAX_COMPARE);
-    }
-    return ["BTC", "ETH", "SOL"];
+  const selectedSymbols = useMemo(() => {
+    const symbols = (queryCoins ?? "").split(",").map((s) => s.trim().toUpperCase()).filter((s) => /^[A-Z0-9]{1,20}$/.test(s));
+    return symbols.length ? [...new Set(symbols)].slice(0, MAX_COMPARE) : ["BTC", "ETH", "SOL"];
   }, [queryCoins]);
 
-  const [selectedSymbols, setSelectedSymbols] = useState<string[]>(initialSymbols);
-  const [details, setDetails] = useState<Record<string, CryptoDetailData>>({});
-  const [loadingMap, setLoadingMap] = useState<Record<string, boolean>>({});
+  const { cache: details, setCache: setDetails, retry } = useComparisonData<CryptoDetailData>(selectedSymbols, "/api/crypto");
   const [allCoins, setAllCoins] = useState<CryptoItem[]>([]);
   const [currency, setCurrency] = useState<"IDR" | "USD">("IDR");
   const [searchPicker, setSearchPicker] = useState("");
@@ -45,12 +38,8 @@ export function CryptoCompare() {
 
   // Sync URL when selectedSymbols change
   const updateSymbols = (newSymbols: string[]) => {
-    setSelectedSymbols(newSymbols);
-    const p = new URLSearchParams();
-    if (newSymbols.length > 0) {
-      p.set("coins", newSymbols.join(","));
-    }
-    router.replace(`/crypto/bandingkan?${p.toString()}`);
+    const p = new URLSearchParams({ coins: newSymbols.join(",") });
+    router.replace(`/crypto/bandingkan?${p.toString()}`, { scroll: false });
   };
 
   // Fetch available coins list for the picker
@@ -63,36 +52,18 @@ export function CryptoCompare() {
       .catch(() => {});
   }, []);
 
-  // Fetch detail for each selected coin
-  useEffect(() => {
-    selectedSymbols.forEach((sym) => {
-      if (details[sym] || loadingMap[sym]) return;
-
-      setLoadingMap((prev) => ({ ...prev, [sym]: true }));
-      fetch(`/api/crypto/${sym}`)
-        .then((r) => (r.ok ? r.json() : null))
-        .then((data: CryptoDetailData | null) => {
-          if (data) {
-            setDetails((prev) => ({ ...prev, [sym]: data }));
-          }
-        })
-        .catch(() => {})
-        .finally(() => {
-          setLoadingMap((prev) => ({ ...prev, [sym]: false }));
-        });
-    });
-  }, [selectedSymbols, details, loadingMap]);
-
   // Refresh only quotes once the initial analysis has loaded.
+  const loadedKey = selectedSymbols.filter((symbol) => details[symbol]).join(",");
   useEffect(() => {
-    if (selectedSymbols.length === 0) return;
+    if (!loadedKey) return;
+    const controller = new AbortController();
     const interval = setInterval(() => {
       if (document.hidden) return;
-      selectedSymbols.forEach((sym) => {
-        fetch("/api/crypto/" + encodeURIComponent(sym) + "?quote=1")
+      loadedKey.split(",").forEach((sym) => {
+        fetch("/api/crypto/" + encodeURIComponent(sym) + "?quote=1", { signal: controller.signal })
           .then((r) => r.ok ? r.json() : null)
           .then((latest: CryptoItem | null) => {
-            if (!latest) return;
+            if (!latest || controller.signal.aborted) return;
             setDetails((prev) => {
               const current = prev[sym];
               if (!current) return prev;
@@ -101,8 +72,11 @@ export function CryptoCompare() {
           }).catch(() => {});
       });
     }, 20000);
-    return () => clearInterval(interval);
-  }, [selectedSymbols]);
+    return () => {
+      clearInterval(interval);
+      controller.abort();
+    };
+  }, [loadedKey, setDetails]);
 
   const removeSymbol = (sym: string) => {
     if (selectedSymbols.length <= 1) return;
@@ -161,7 +135,7 @@ export function CryptoCompare() {
     });
   }, [allCoins, selectedSymbols, searchPicker]);
 
-  const activeCoins = selectedSymbols.map((s) => details[s]).filter(Boolean);
+  const activeCoins = selectedSymbols.map((s) => details[s]).filter((coin): coin is CryptoDetailData => Boolean(coin));
 
   return (
     <main className="screen-shell screen-section space-y-6">
@@ -248,7 +222,7 @@ export function CryptoCompare() {
       }`}>
         {selectedSymbols.map((sym, idx) => {
           const coin = details[sym];
-          const isLoading = loadingMap[sym] && !coin;
+          const isLoading = coin === undefined;
 
           return (
             <Card
@@ -323,8 +297,9 @@ export function CryptoCompare() {
                   </div>
                 </div>
               ) : (
-                <div className="py-4 text-center text-xs text-rose-500">
-                  Data {sym} tidak ditemukan
+                <div className="space-y-2 py-4 text-center text-xs text-rose-700 dark:text-rose-300">
+                  <p role="status">Data {sym} belum tersedia.</p>
+                  <button type="button" onClick={() => retry([sym])} className="control-button ios-glass-pill rounded-xl font-semibold">Coba lagi</button>
                 </div>
               )}
             </Card>

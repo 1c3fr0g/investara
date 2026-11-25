@@ -22,22 +22,24 @@ const BADGE: Record<KalenderItem["jenis"], { text: string; cls: string }> = {
   lalu: { text: "Sudah ex-date", cls: "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400" },
 };
 
-const tgl = (t: number | null) => (t === null ? "-" : new Date(t).toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" }));
-const bulan = (t: number) => new Date(t).toLocaleDateString("id-ID", { month: "long", year: "numeric" });
+const tgl = (t: number | null) => (t === null ? "-" : new Date(t).toLocaleDateString("id-ID", { timeZone: "Asia/Jakarta", day: "numeric", month: "short", year: "numeric" }));
+const bulan = (t: number) => new Date(t).toLocaleDateString("id-ID", { timeZone: "Asia/Jakarta", month: "long", year: "numeric" });
 
 type CalendarResult =
   | { requestKey: string; items: KalenderItem[] }
   | { requestKey: string; error: true };
 
 export function Calendar() {
-  const { status } = useSession();
+  const { status, data: session } = useSession();
+  const owner = status === "authenticated" ? session?.user?.id : undefined;
   const { list: watch } = useWatchlist();
   const [result, setResult] = useState<CalendarResult | null>(null);
   const [hari, setHari] = useState(90);
   const [retry, setRetry] = useState(0);
   const [filter, setFilter] = useState<Filter>("semua");
   const [mine, setMine] = useState(false);
-  const [lots, setLots] = useState<Record<string, number>>({});
+  const [holdings, setHoldings] = useState<{ owner: string; lots: Record<string, number> } | null>(null);
+  const lots = holdings?.owner === owner ? holdings?.lots : undefined;
   const allStatusesRef = useRef<HTMLButtonElement>(null);
   const requestKey = `${hari}:${retry}`;
   const current = result?.requestKey === requestKey ? result : null;
@@ -59,21 +61,23 @@ export function Calendar() {
   }, [hari, requestKey]);
 
   useEffect(() => {
-    if (status !== "authenticated") return;
-    fetch("/api/portofolio")
+    if (!owner) return;
+    const controller = new AbortController();
+    fetch("/api/portofolio", { signal: controller.signal })
       .then((r) => (r.ok ? r.json() : { items: [] }))
       .then((j: { items: { kode: string; lot: number }[] }) => {
         const m: Record<string, number> = {};
         for (const h of j.items) m[h.kode] = (m[h.kode] ?? 0) + h.lot;
-        setLots(m);
+        if (!controller.signal.aborted) setHoldings({ owner, lots: m });
       })
       .catch(() => {});
-  }, [status]);
+    return () => controller.abort();
+  }, [owner]);
 
   const authed = status === "authenticated";
   const onlyMine = authed && mine;
   const hasFilters = filter !== "semua" || onlyMine;
-  const mineSet = useMemo(() => new Set([...Object.keys(lots), ...watch]), [lots, watch]);
+  const mineSet = useMemo(() => new Set([...Object.keys(lots ?? {}), ...watch]), [lots, watch]);
   const shown = (items ?? []).filter((i) =>
     (filter === "semua" || i.jenis === filter) && (!onlyMine || mineSet.has(i.kode)),
   );
@@ -208,7 +212,7 @@ export function Calendar() {
                         <StarButton kode={i.kode} className="min-h-8 min-w-8 shrink-0" />
                       </div>
                       <div className="hidden text-xs text-zinc-600 dark:text-zinc-400 sm:block">{i.nama}</div>
-                      {authed && lots[i.kode] > 0 && (
+                      {authed && lots && lots[i.kode] > 0 && (
                         <div className="mt-1 text-xs font-semibold text-emerald-700 dark:text-emerald-400">Anda punya {lots[i.kode]} lot</div>
                       )}
                       <details className="mt-1 text-xs text-zinc-600 dark:text-zinc-400 md:hidden">
